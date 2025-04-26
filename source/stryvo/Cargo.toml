@@ -1,0 +1,96 @@
+[package]
+name          = "stryvo"
+version       = "0.6.0"
+
+authors       = [
+    "James Munns <james@onevariable.com>",
+    "Pooria Jamili <pooriajamili@gmail.com>",
+]
+edition       = "2021"
+readme        = "../../README.md"
+repository    = "https://github.com/PooriaJ/stryvo"
+description   = "A reverse proxy application, based on the pingora library from Cloudflare"
+license       = "Apache-2.0"
+categories    = [
+
+]
+keywords      = [
+    "proxy",
+]
+documentation = "https://docs.rs/stryvo/"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "doc_cfg"]
+
+[dependencies]
+async-trait = "0.1.79"
+cidr = "0.2.3"
+chrono = "0.4.37"
+concread = "0.5.3"
+futures-util = "0.3.30"
+http = "1.0.0"
+kdl = "4.6.0"
+leaky-bucket = "1.1.2"
+log = "0.4.21"
+miette = { version = "5.10.0", features = ["fancy"] }
+regex = "1.10.4"
+thiserror = "1.0.61"
+tokio = { version = "1.37.0", features = ["fs", "io-util", "net", "sync", "time", "rt-multi-thread"] }
+toml = "0.8.12"
+tracing = "0.1.40"
+bincode = "1.3"
+bytes = "1.0"
+once_cell = "1.18.0" 
+ahash = "0.8.11"
+futures = "0.3.30"
+rand = "0.8.5"
+flate2 = "1.1.1"
+brotli = "3.4.0"
+zstd = "0.13.3"
+crc32fast = "1.4.2"
+
+[dependencies.static-files-module]
+version = "0.2"
+
+[dependencies.pandora-module-utils]
+version = "0.2"
+
+[dependencies.tracing-subscriber]
+version  = "0.3.18"
+features = [
+    "fmt",
+    "tracing-log",
+]
+
+[dependencies.clap]
+version  = "4.5.4"
+features = [
+    "derive",
+]
+
+[dependencies.serde]
+version  = "1.0.197"
+features = [
+    "derive"
+]
+
+# Pingora dependencies
+
+[dependencies.pingora]
+version = "0.3.0"
+
+[dependencies.pingora-core]
+version = "0.3.0"
+
+[dependencies.pingora-proxy]
+version = "0.3.0"
+
+[dependencies.pingora-http]
+version = "0.3.0"
+
+[dependencies.pingora-load-balancing]
+version = "0.3.0"
+
+[dependencies.pingora-cache]
+version = "0.3.0"

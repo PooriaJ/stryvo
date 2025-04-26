@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  stryvo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stryvo-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./source/stryvo/assets:/app/assets
+      - ./logs:/app/logs
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+    command: ["--config-kdl", "/app/assets/test-config.kdl"]
+volumes:
+  logs:
+    driver: local

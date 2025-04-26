@@ -1,0 +1,77 @@
+# Test stryvo configuration in Nginx-like syntax
+
+# System-wide configuration
+system {
+    threads_per_service 8
+    daemonize false
+    pid_file "/tmp/stryvo.pidfile"
+    upgrade_socket "/tmp/stryvo-upgrade.sock"
+}
+
+# HTTP services configuration
+http {
+    # Basic proxy server
+    server {
+        server_name Example1
+        
+        # Listen directives
+        listen 8080
+        listen 4443 ssl cert="./assets/test.crt" key="./assets/test.key" http2
+        
+        # Upstream configuration
+        upstream backend {
+            # Load balancing method
+            hash
+            
+            # Upstream servers
+            server 91.107.223.4:443 tls_sni="onevariable.com" proto="h2-or-h1"
+        }
+        
+        # Path control and rate limiting
+        location / {
+            # Request filters
+            deny 192.168.0.0/16
+            deny 10.0.0.0/8
+            deny 2001:0db8::0/32
+            
+            # Upstream request headers
+            proxy_set_header x-proxy-friend "stryvo"
+            
+            # Response headers
+            add_header x-with-love-from "stryvo"
+            
+            # Rate limiting
+            limit_req zone=ip burst=10 rate=100r/s
+        }
+        
+        location ~ \.mp4$ {
+            # Rate limiting for MP4 files
+            limit_req zone=uri_.*\.mp4 burst=50 rate=333r/s
+        }
+        
+        location ~ static/.* {
+            # Rate limiting for static files
+            limit_req zone=uri_static/.* burst=20 rate=1000r/s
+        }
+    }
+    
+    # Minimal proxy server
+    server {
+        server_name Example2
+        listen 8000
+        
+        upstream minimal {
+            server 91.107.223.4:80
+        }
+    }
+    
+    # File server
+    server {
+        server_name Example3
+        listen 9000
+        listen 9443 ssl cert="./assets/test.crt" key="./assets/test.key" http2
+        
+        # File server root directory
+        root "."
+    }
+}

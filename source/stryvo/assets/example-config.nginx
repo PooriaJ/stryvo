@@ -1,0 +1,63 @@
+# System-wide configuration
+system {
+    threads_per_service 8;
+    daemonize false;
+    pid_file "/tmp/stryvo.pidfile";
+    upgrade_socket "/tmp/stryvo-upgrade.sock";
+}
+
+# Upstream definitions (can be referenced by proxy_pass)
+upstream backend_onevariable {
+    server 91.107.223.4:443 tls_sni="onevariable.com" proto="h2-or-h1";
+    hash consistent;  # Ketama with UriPath and Static discovery
+    health_check none;
+}
+
+upstream backend_simple {
+    server 91.107.223.4:80;
+    random;  # Random load balancing
+}
+
+# HTTP block containing server definitions
+http {
+    # First server: Complex proxy with rate limiting and path control
+    server {
+        server_name Example1;
+        listen 0.0.0.0:8680;
+
+        location / {
+            proxy_pass backend_onevariable;
+            deny 192.168.0.0/16;
+            deny 10.0.0.0/8;
+            deny 2001:0db8::0/32;
+            proxy_set_header x-proxy-friend "stryvo";
+            proxy_hide_header ".*(secret|SECRET).*";
+            add_header x-with-love-from "stryvo";
+            hide_header ".*ETag.*";
+        }
+
+        location / {
+            limit_req zone=ip burst=10 rate=100r/s;
+            limit_req zone=static burst=20 rate=5000r/s pattern="static/.*";
+            limit_req zone=any_mp4 burst=50 rate=666r/s;
+        }
+    }
+
+    # Second server: Minimal proxy configuration
+    server {
+        server_name Example2;
+        listen 0.0.0.0:8000;
+
+        location / {
+            proxy_pass backend_simple;
+        }
+    }
+
+    # Third server: File server
+    server {
+        server_name Example3;
+        listen 0.0.0.0:9000;
+
+        root ".";
+    }
+}
