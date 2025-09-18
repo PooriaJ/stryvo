@@ -1,0 +1,91 @@
+system {
+    threads-per-service 8
+    daemonize false
+    pid-file "/tmp/stryvo.pidfile"
+    upgrade-socket "/tmp/stryvo-upgrade.sock"
+    
+    logging {
+        access-log "stryvo-access.log"
+        error-log "stryvo-error.log"
+        level "INFO"
+        enabled true
+    }
+}
+
+services {
+    Example1 {
+        listeners {
+            "0.0.0.0:8080"
+            "0.0.0.0:4443" cert-path="./assets/test.crt" key-path="./assets/test.key" offer-h2=true
+        }
+        
+        rate-limiting {
+            rule kind="source-ip" max-buckets=4000 tokens-per-bucket=10 refill-qty=1 refill-rate-ms=10
+            rule kind="specific-uri" pattern="static/.*" max-buckets=2000 tokens-per-bucket=20 refill-qty=5 refill-rate-ms=1
+            rule kind="any-matching-uri" pattern=r".*\.mp4" tokens-per-bucket=50 refill-qty=2 refill-rate-ms=3
+        }
+        
+        connectors {
+            load-balance {
+                selection "Ketama" key="UriPath"
+                discovery "Static"
+                health-check "None"
+            }
+            
+            "91.107.223.4:443" tls-sni="onevariable.com" proto="h2-or-h1"
+        }
+        
+        path-control {
+            request-filters {
+                filter kind="block-cidr-range" addrs="192.168.0.0/16, 10.0.0.0/8, 2001:0db8::0/32"
+            }
+            
+            upstream-request {
+                filter kind="remove-header-key-regex" pattern=".*(secret|SECRET).*"
+                filter kind="upsert-header" key="x-proxy-friend" value="stryvo"
+            }
+            
+            upstream-response {
+                filter kind="remove-header-key-regex" pattern=".*ETag.*"
+                filter kind="upsert-header" key="x-with-love-from" value="stryvo"
+            }
+        }
+        
+        cache {
+            cache-enabled true
+            cache-dir "/tmp/stryvo-cache/example1"
+            cache-ttl 300
+            browser_cache_enabled false
+            browser_cache_ttl 3600
+        }
+    }
+    
+    Example2 {
+        listeners {
+            "0.0.0.0:8000"
+        }
+        
+        connectors {
+            "91.107.223.4:80"
+        }
+        
+        cache {
+            cache-enabled true
+            cache-dir "/tmp/stryvo-cache/example2"
+            cache-ttl 600
+            browser_cache_enabled true
+            browser_cache_ttl 7200
+        }
+    }
+    
+    Example3 {
+        listeners {
+            "0.0.0.0:9000"
+            "0.0.0.0:9443" cert-path="./assets/test.crt" key-path="./assets/test.key" offer-h2=true
+        }
+        
+        file-server {
+            base-path "."
+        }
+    }
+}

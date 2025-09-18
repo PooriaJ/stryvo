@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+/debug/
+
+# Rustfmt backup files
+**/*.rs.bk
+
+.DS_Store
+
+# Windows debugging files
+*.pdb
+
+# General backup and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# VSCode settings (optional, if you use VSCode)
+.vscode/
+
+# Docker
+docker-compose.override.yml
+docker-compose*.yaml
+Dockerfile*
+
+# Ignore binaries or local output
+*.exe
+*.out
+*.app

@@ -1,0 +1,231 @@
+# Stryvo Configuration File
+# -------------------------
+# This file defines the configuration for the Stryvo proxy/server application.
+# Structure:
+#   - system: Global application settings
+#   - services: Individual proxy or file server definitions
+
+#------------------------------------------------------------------------------
+# SYSTEM CONFIGURATION
+#------------------------------------------------------------------------------
+# Global settings that apply to the entire application
+
+system {
+    # Number of threads allocated to each service
+    threads-per-service 8
+    
+    # PROCESS MANAGEMENT
+    # ------------------
+    # Whether the server should run as a background daemon process
+    # NOTE: If set to "true", a valid "pid-file" path must be specified
+    daemonize false
+    
+    # Path to the PID file used for tracking the daemon process
+    # NOTE: Must be an absolute path (see issue #50)
+    pid-file "/tmp/stryvo.pidfile"
+    
+    # Path to the socket used for zero-downtime upgrades
+    # NOTE: Must be an absolute path (see issue #50)
+    # NOTE: The upgrade functionality is only supported on Linux
+    upgrade-socket "/tmp/stryvo-upgrade.sock"
+    
+    # LOGGING CONFIGURATION
+    # --------------------
+    logging {
+        # Path for HTTP access logs (requests and responses)
+        # Can be absolute or relative to working directory
+        access-log "stryvo-access.log"
+        
+        # Path for server error logs (crashes, errors, warnings)
+        # Can be absolute or relative to working directory
+        error-log "stryvo-error.log"
+        
+        # Logging verbosity level:
+        # - TRACE: Most detailed, includes all information
+        # - DEBUG: Detailed information for troubleshooting
+        # - INFO: General operational information
+        # - WARN: Potential issues that don't affect operation
+        # - ERROR: Significant problems affecting functionality
+        level "INFO"
+        
+        # Master switch to enable/disable all logging
+        # Not recommended to disable in production environments
+        enabled true
+    }
+}
+
+#------------------------------------------------------------------------------
+# SERVICES CONFIGURATION
+#------------------------------------------------------------------------------
+# Services define the core functionality of Stryvo.
+# Each service can be a reverse proxy or a file server.
+
+services {
+    #--------------------------------------------------------------------------
+    # Service: Example1
+    # Type: Reverse Proxy with advanced features
+    #--------------------------------------------------------------------------
+    Example1 {
+        # LISTENERS
+        # ---------
+        # "Downstream" interfaces that accept incoming connections
+        # Format: "IP:PORT" [TLS options]
+        listeners {
+            # HTTP listener on all interfaces, port 8080
+            "0.0.0.0:8080"
+            
+            # HTTPS listener on all interfaces, port 4443
+            # With TLS certificate and HTTP/2 support
+            "0.0.0.0:4443" cert-path="./assets/test.crt" key-path="./assets/test.key" offer-h2=true
+        }
+        
+        # RATE LIMITING
+        # -------------
+        # Controls request frequency to prevent abuse and overload
+        # Multiple rules can be combined; requests must satisfy ALL applicable rules
+        rate-limiting {
+            # IP-based rate limiting
+            # Limits requests based on client IP address
+            rule kind="source-ip" \
+                max-buckets=4000          # Track up to 4000 unique IPs
+                tokens-per-bucket=10      # Allow burst of 10 requests per IP
+                refill-qty=1              # Add 1 token per refill interval
+                refill-rate-ms=10         # Refill every 10ms (100 req/sec per IP)
+                
+            # Path-specific rate limiting for static resources
+            # Limits requests to specific URI paths matching the pattern
+            rule kind="specific-uri" pattern="static/.*" \
+                max-buckets=2000          # Track up to 2000 unique URIs
+                tokens-per-bucket=20      # Allow burst of 20 requests per URI
+                refill-qty=5              # Add 5 tokens per refill interval
+                refill-rate-ms=1          # Refill every 1ms (5000 req/sec per URI)
+                
+            # Pattern-based rate limiting for MP4 files
+            # All URIs matching the pattern share a single rate limit bucket
+            rule kind="any-matching-uri" pattern=r".*\.mp4" \
+                tokens-per-bucket=50      # Allow burst of 50 requests for MP4 files
+                refill-qty=2              # Add 2 tokens per refill interval
+                refill-rate-ms=3          # Refill every 3ms (~667 req/sec for all MP4s)
+        }
+        
+        # CONNECTORS
+        # ----------
+        # "Upstream" servers to which requests are forwarded
+        # Format: "IP:PORT" [options]
+        connectors {
+            # LOAD BALANCING CONFIGURATION (Optional)
+            # Controls how requests are distributed among connectors
+            load-balance {
+                # Consistent hashing based on URI path (Ketama algorithm)
+                selection "Ketama" key="UriPath"
+                
+                # Static list of upstream servers (vs. dynamic discovery)
+                discovery "Static"
+                
+                # No health checking for upstream servers
+                health-check "None"
+            }
+            
+            # HTTPS upstream with HTTP/2 support
+            # Connects to onevariable.com on port 443
+            "91.107.223.4:443" tls-sni="onevariable.com" proto="h2-or-h1"
+        }
+        
+        # PATH CONTROL (Optional)
+        # -----------
+        # Filters and modifications for requests and responses
+        path-control {
+            # INCOMING CLIENT REQUEST FILTERS
+            request-filters {
+                # Block requests from private IP ranges
+                filter kind="block-cidr-range" addrs="192.168.0.0/16, 10.0.0.0/8, 2001:0db8::0/32"
+            }
+            
+            # OUTGOING REQUEST MODIFICATIONS (to upstream)
+            upstream-request {
+                # Remove headers containing "secret" or "SECRET"
+                filter kind="remove-header-key-regex" pattern=".*(secret|SECRET).*"
+                
+                # Add a custom header to identify the proxy
+                filter kind="upsert-header" key="x-proxy-friend" value="stryvo"
+            }
+            
+            # INCOMING RESPONSE MODIFICATIONS (from upstream)
+            upstream-response {
+                # Remove ETag headers from responses
+                filter kind="remove-header-key-regex" pattern=".*ETag.*"
+                
+                # Add a custom header to responses
+                filter kind="upsert-header" key="x-with-love-from" value="stryvo"
+            }
+        }
+        
+        # CACHING CONFIGURATION (Optional)
+        # --------------------
+        # Controls how responses are cached to improve performance
+        cache {
+            # Master switch to enable/disable caching
+            cache-enabled true
+            
+            # How long cached responses remain valid (seconds)
+            cache-ttl 10
+            
+            # Number of internal cache divisions for performance
+            # Higher values reduce lock contention with large caches
+            shard-count 32
+            
+            # Directory where cached responses are stored
+            # Must be an absolute path
+            cache-dir "/tmp/test/stryvo-cache"
+            
+            # Maximum size of cacheable response (bytes)
+            # Larger responses won't be cached (default: 1MB)
+            max-file-size 1048576  # 1MB
+            
+            # Whether to send cache control headers to browsers
+            browser_cache_enabled false
+            
+            # TTL for browser caching when enabled (seconds)
+            browser_cache_ttl 3600  # 1 hour
+        }
+    }
+    
+    #--------------------------------------------------------------------------
+    # Service: Example2
+    # Type: Simple Reverse Proxy (minimal configuration)
+    #--------------------------------------------------------------------------
+    Example2 {
+        # Single HTTP listener on all interfaces, port 8000
+        listeners {
+            "0.0.0.0:8000"
+        }
+        
+        # Single HTTP upstream server
+        connectors {
+            "91.107.223.4:80"
+        }
+    }
+    
+    #--------------------------------------------------------------------------
+    # Service: Example3
+    # Type: File Server
+    #--------------------------------------------------------------------------
+    Example3 {
+        # LISTENERS for file server
+        listeners {
+            # HTTP listener on all interfaces, port 9000
+            "0.0.0.0:9000"
+            
+            # HTTPS listener on all interfaces, port 9443
+            "0.0.0.0:9443" cert-path="./assets/test.crt" key-path="./assets/test.key" offer-h2=true
+        }
+        
+        # FILE SERVER CONFIGURATION
+        file-server {
+            # Root directory from which files will be served
+            # All files within this directory will be accessible
+            # Relative to the working directory of the Stryvo process
+            base-path "."
+        }
+    }
+}

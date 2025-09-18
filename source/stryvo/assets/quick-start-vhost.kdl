@@ -1,0 +1,91 @@
+// Quick Start Virtual Host Configuration
+// This is a minimal example to get you started with virtual hosts
+//
+// How VHost SSL/TLS works:
+// 1. The HTTPS listener needs a default certificate (specified on the listener)
+// 2. Each domain can have its own certificate (specified in the domain's ssl block)
+// 3. During TLS handshake, the server uses SNI to select the appropriate certificate
+// 4. If no matching domain certificate is found, the default certificate is used
+
+system {
+    threads-per-service 4
+    daemonize false
+    logging {
+        access-log "stryvo-access.log"
+        error-log "stryvo-error.log"
+        level "error"
+        enabled true
+    }
+}
+
+services {
+    QuickStartVHost {
+        listeners {
+            "0.0.0.0:80"   // HTTP listener
+            "0.0.0.0:443" ssl=true   // HTTPS listener with default certificate
+        }
+        
+        vhosts {
+            // Main website
+            domain "test.local" {
+                connectors {
+                    "91.107.223.4:443" tls-sni="onevariable.com" proto="h2-or-h1" // Your web application
+                }
+                ssl {
+                    cert-path "./assets/certs/test.local.crt"
+                    key-path "./assets/certs/test.local.key"
+                }
+            }
+            
+            // API subdomain
+            domain "test2.local" {
+                connectors {
+                    "1.1.1.1:443"  // Your API server
+                }
+                ssl {
+                    cert-path "./assets/certs/test2.local.crt"
+                    key-path "./assets/certs/test2.local.key"
+                }
+            }
+            
+            // Required default configuration
+            default {
+                connectors {
+                    "94.101.184.184:443" // Default backend
+                }
+                ssl {
+                    cert-path "./assets/certs/test.local.crt"
+                    key-path "./assets/certs/test.local.key"
+                }
+            }
+        }
+        
+        // Optional: Basic rate limiting
+        rate-limiting {
+            rule kind="source-ip" \
+                max-buckets=1000 \
+                tokens-per-bucket=100 \
+                refill-qty=10 \
+                refill-rate-ms=1000
+        }
+        
+        // Caching configuration
+        cache {
+            cache-enabled true
+            cache-ttl 300  // 5 minutes
+            cache-directory "/tmp/stryvo-cache"
+            cache-max-file-size 10485760  // 10MB
+            cache-shard-count 64
+            
+            browser-cache-enabled true
+            browser-cache-ttl 36000  // 1 hour
+        }
+    }
+}
+
+// Instructions:
+// 1. Replace test.local with your actual domain
+// 2. Update backend IP addresses and ports (127.0.0.1:3000, etc.)
+// 3. Update SSL certificate paths
+// 4. Start your backend services
+// 5. Run: stryvo --config-kdl quick-start-vhost.kdl
