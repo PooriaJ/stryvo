@@ -1,0 +1,596 @@
+# Stryvo Comprehensive Configuration (YAML Format)
+# =================================================
+# This file demonstrates ALL available Stryvo features and configuration options
+# in a single comprehensive example. Use this as a reference for all capabilities.
+
+#------------------------------------------------------------------------------
+# SYSTEM CONFIGURATION
+#------------------------------------------------------------------------------
+# Global settings that apply to the entire application
+
+system:
+  # Number of threads allocated to each service
+  threads-per-service: 8
+  
+  # PROCESS MANAGEMENT
+  # ------------------
+  # Whether the server should run as a background daemon process
+  # NOTE: If set to true, a valid "pid-file" path must be specified
+  daemonize: false
+  
+  # Path to the PID file used for tracking the daemon process
+  # NOTE: Must be an absolute path (see issue #50)
+  pid-file: "/tmp/stryvo.pidfile"
+  
+  # Path to the socket used for zero-downtime upgrades
+  # NOTE: Must be an absolute path (see issue #50)
+  # NOTE: The upgrade functionality is only supported on Linux
+  upgrade-socket: "/tmp/stryvo-upgrade.sock"
+  
+  # LOGGING CONFIGURATION
+  # --------------------
+  logging:
+    # Path for HTTP access logs (requests and responses)
+    # Can be absolute or relative to working directory
+    access-log: "stryvo-access.log"
+    
+    # Path for server error logs (crashes, errors, warnings)
+    # Can be absolute or relative to working directory
+    error-log: "stryvo-error.log"
+    
+    # Logging verbosity level:
+    # - TRACE: Most detailed, includes all information
+    # - DEBUG: Detailed information for troubleshooting
+    # - INFO: General operational information
+    # - WARN: Potential issues that don't affect operation
+    # - ERROR: Significant problems affecting functionality
+    level: "INFO"
+    
+    # Master switch to enable/disable all logging
+    # Not recommended to disable in production environments
+    enabled: true
+
+#------------------------------------------------------------------------------
+# BASIC PROXY CONFIGURATIONS
+#------------------------------------------------------------------------------
+# Simple reverse proxy services with advanced features
+
+basic-proxy:
+  #--------------------------------------------------------------------------
+  # Service: AdvancedProxy
+  # Type: Reverse Proxy with ALL enhanced features
+  #--------------------------------------------------------------------------
+  - name: "AdvancedProxy"
+    
+    # LISTENERS
+    # ---------
+    # "Downstream" interfaces that accept incoming connections
+    listeners:
+      # HTTP listener on all interfaces, port 8080
+      - addr: "0.0.0.0:8080"
+        offer-h2: false
+      
+      # HTTPS listener with TLS certificate and HTTP/2 support
+      - addr: "0.0.0.0:4443"
+        tls:
+          cert_path: "./assets/certs/test.local.crt"
+          key_path: "./assets/certs/test.local.key"
+        offer-h2: true
+    
+    # CONNECTORS
+    # ----------
+    # "Upstream" servers to which requests are forwarded
+    connectors:
+      # HTTPS upstream with HTTP/2 support
+      - proxy-addr: "91.107.223.4:443"
+        tls-sni: "onevariable.com"
+        proto: "h2-or-h1"  # Options: h1-only, h2-only, h2-or-h1
+      
+      # HTTP upstream for load balancing
+      - proxy-addr: "91.107.223.4:80"
+        proto: "h1-only"
+    
+    # LOAD BALANCING CONFIGURATION
+    # ----------------------------
+    # Controls how requests are distributed among connectors
+    load-balance:
+      # Consistent hashing based on URI path (Ketama algorithm)
+      selection: "Ketama"  # Options: RoundRobin, Random, FNV, Ketama
+      key: "UriPath"       # Options: UriPath, SourceAddrAndUriPath
+      
+      # Static list of upstream servers (vs. dynamic discovery)
+      discovery: "Static"
+      
+      # No health checking for upstream servers
+      health-check: "None"
+    
+    # RATE LIMITING
+    # -------------
+    # Controls request frequency to prevent abuse and overload
+    # Multiple rules can be combined; requests must satisfy ALL applicable rules
+    rate-limiting:
+      rules:
+        # IP-based rate limiting (Multi-rater)
+        # Limits requests based on client IP address
+        - kind: "source-ip"
+          max-buckets: 4000          # Track up to 4000 unique IPs
+          tokens-per-bucket: 10      # Allow burst of 10 requests per IP
+          refill-qty: 1              # Add 1 token per refill interval
+          refill-rate-ms: 10         # Refill every 10ms (100 req/sec per IP)
+        
+        # Path-specific rate limiting (Multi-rater)
+        # Limits requests to specific URI paths matching the pattern
+        - kind: "specific-uri"
+          pattern: "static/.*"
+          max-buckets: 2000          # Track up to 2000 unique URIs
+          tokens-per-bucket: 20      # Allow burst of 20 requests per URI
+          refill-qty: 5              # Add 5 tokens per refill interval
+          refill-rate-ms: 1          # Refill every 1ms (5000 req/sec per URI)
+        
+        # Pattern-based rate limiting (Single-rater)
+        # All URIs matching the pattern share a single rate limit bucket
+        - kind: "any-matching-uri"
+          pattern: ".*\\.mp4"
+          tokens-per-bucket: 50      # Allow burst of 50 requests for MP4 files
+          refill-qty: 2              # Add 2 tokens per refill interval
+          refill-rate-ms: 3          # Refill every 3ms (~667 req/sec for all MP4s)
+    
+    # PATH CONTROL
+    # ------------
+    # Filters and modifications for requests and responses
+    path-control:
+      # INCOMING CLIENT REQUEST FILTERS
+      request-filters:
+        # Block requests from private IP ranges
+        - kind: "block-cidr-range"
+          addrs: "192.168.0.0/16, 10.0.0.0/8, 2001:0db8::0/32"
+      
+      # OUTGOING REQUEST MODIFICATIONS (to upstream)
+      upstream-request-filters:
+        # Remove headers containing "secret" or "SECRET"
+        - kind: "remove-header-key-regex"
+          pattern: ".*(secret|SECRET).*"
+        
+        # Add a custom header to identify the proxy
+        - kind: "upsert-header"
+          key: "x-proxy-friend"
+          value: "stryvo"
+      
+      # INCOMING RESPONSE MODIFICATIONS (from upstream)
+      upstream-response-filters:
+        # Remove ETag headers from responses
+        - kind: "remove-header-key-regex"
+          pattern: ".*ETag.*"
+        
+        # Add a custom header to responses
+        - kind: "upsert-header"
+          key: "x-with-love-from"
+          value: "stryvo"
+    
+    # CACHING CONFIGURATION
+    # --------------------
+    # Controls how responses are cached to improve performance
+    cache:
+      # Master switch to enable/disable caching
+      cache-enabled: true
+      
+      # How long cached responses remain valid (seconds)
+      cache-ttl: 300
+      
+      # Number of internal cache divisions for performance
+      # Higher values reduce lock contention with large caches
+      shard-count: 32
+      
+      # Directory where cached responses are stored
+      # Must be an absolute path
+      cache-dir: "/tmp/stryvo-cache"
+      
+      # Maximum size of cacheable response (bytes)
+      # Larger responses won't be cached (default: 1MB)
+      max-file-size: 1048576  # 1MB
+      
+      # Whether to send cache control headers to browsers
+      browser-cache-enabled: false
+      
+      # TTL for browser caching when enabled (seconds)
+      browser-cache-ttl: 3600  # 1 hour
+
+  #--------------------------------------------------------------------------
+  # Service: RoundRobinProxy
+  # Type: Demonstrates RoundRobin load balancing
+  #--------------------------------------------------------------------------
+  - name: "RoundRobinProxy"
+    
+    listeners:
+      - addr: "0.0.0.0:8081"
+        offer-h2: false
+    
+    connectors:
+      - proxy-addr: "httpbin.org:80"
+      - proxy-addr: "httpbin.org:80"
+    
+    load-balance:
+      selection: "RoundRobin"
+      discovery: "Static"
+      health-check: "None"
+    
+    cache:
+      cache-enabled: false
+
+  #--------------------------------------------------------------------------
+  # Service: RandomProxy
+  # Type: Demonstrates Random load balancing
+  #--------------------------------------------------------------------------
+  - name: "RandomProxy"
+    
+    listeners:
+      - addr: "0.0.0.0:8082"
+        offer-h2: false
+    
+    connectors:
+      - proxy-addr: "httpbin.org:80"
+      - proxy-addr: "httpbin.org:80"
+    
+    load-balance:
+      selection: "Random"
+      discovery: "Static"
+      health-check: "None"
+    
+    cache:
+      cache-enabled: false
+
+  #--------------------------------------------------------------------------
+  # Service: FnvProxy
+  # Type: Demonstrates FNV hash-based load balancing
+  #--------------------------------------------------------------------------
+  - name: "FnvProxy"
+    
+    listeners:
+      - addr: "0.0.0.0:8083"
+        offer-h2: false
+    
+    connectors:
+      - proxy-addr: "httpbin.org:80"
+      - proxy-addr: "httpbin.org:80"
+    
+    load-balance:
+      selection: "FNV"
+      key: "SourceAddrAndUriPath"
+      discovery: "Static"
+      health-check: "None"
+    
+    cache:
+      cache-enabled: false
+
+  #--------------------------------------------------------------------------
+  # Service: SimpleProxy
+  # Type: Minimal configuration example
+  #--------------------------------------------------------------------------
+  - name: "SimpleProxy"
+    
+    listeners:
+      - addr: "0.0.0.0:8000"
+        offer-h2: false
+    
+    connectors:
+      - proxy-addr: "91.107.223.4:80"
+    
+    cache:
+      cache-enabled: false
+
+#------------------------------------------------------------------------------
+# VIRTUAL HOST PROXY CONFIGURATIONS
+#------------------------------------------------------------------------------
+# Advanced proxy services with domain-based routing
+
+vhost-proxy:
+  #--------------------------------------------------------------------------
+  # Service: ComprehensiveVHost
+  # Type: Virtual Host Proxy with ALL features
+  #--------------------------------------------------------------------------
+  - name: "ComprehensiveVHost"
+    
+    # LISTENERS for virtual host proxy
+    listeners:
+      # HTTP listener on all interfaces, port 80
+      - addr: "0.0.0.0:80"
+        offer-h2: false
+      
+      # HTTPS listener on all interfaces, port 443
+      - addr: "0.0.0.0:443"
+        offer-h2: true
+        # Note: TLS config is per-domain, not per-listener in VHost mode
+    
+    # DOMAIN CONFIGURATIONS
+    # ---------------------
+    # Specific configurations for different domains
+    domains:
+      # Production API domain with RoundRobin load balancing
+      "api.example.com":
+        upstreams:
+          - proxy-addr: "10.0.1.10:8080"
+          - proxy-addr: "10.0.1.11:8080"
+          - proxy-addr: "10.0.1.12:8080"
+        ssl-config:
+          cert_path: "./assets/certs/test.local.crt"
+          key_path: "./assets/certs/test.local.key"
+        load-balance:
+          selection: "RoundRobin"
+          discovery: "Static"
+          health-check: "None"
+      
+      # Web application domain with Ketama hashing
+      "app.example.com":
+        upstreams:
+          - proxy-addr: "10.0.2.10:3000"
+          - proxy-addr: "10.0.2.11:3000"
+        ssl-config:
+          cert_path: "./assets/certs/test.local.crt"
+          key_path: "./assets/certs/test.local.key"
+        load-balance:
+          selection: "Ketama"
+          key: "UriPath"
+          discovery: "Static"
+          health-check: "None"
+      
+      # Wildcard subdomain for microservices
+      "*.services.example.com":
+        upstreams:
+          - proxy-addr: "10.0.3.10:8080"
+          - proxy-addr: "10.0.3.11:8080"
+        load-balance:
+          selection: "Random"
+          discovery: "Static"
+          health-check: "None"
+      
+      # Development environment
+      "dev.example.com":
+        upstreams:
+          - proxy-addr: "10.0.4.10:8080"
+        ssl-config:
+          cert_path: "./assets/certs/test.local.crt"
+          key_path: "./assets/certs/test.local.key"
+      
+      # Static content domain with FNV hashing
+      "cdn.example.com":
+        upstreams:
+          - proxy-addr: "10.0.5.10:80"
+          - proxy-addr: "10.0.5.11:80"
+          - proxy-addr: "10.0.5.12:80"
+        load-balance:
+          selection: "FNV"
+          key: "SourceAddrAndUriPath"
+          discovery: "Static"
+          health-check: "None"
+    
+    # DEFAULT DOMAIN CONFIGURATION
+    # ----------------------------
+    # Fallback configuration for requests that don't match any specific domain
+    default-domain:
+      upstreams:
+        - proxy-addr: "10.0.0.100:8080"
+      ssl-config:
+        cert_path: "./assets/certs/test2.local.crt"
+        key_path: "./assets/certs/test2.local.key"
+    
+    # RATE LIMITING for virtual host
+    # ------------------------------
+    # Controls request frequency across all domains
+    rate-limiting:
+      rules:
+        # Global IP-based rate limiting for the entire VHost
+        - kind: "source-ip"
+          max-buckets: 10000
+          tokens-per-bucket: 50
+          refill-qty: 5
+          refill-rate-ms: 100
+        
+        # API endpoint specific rate limiting
+        - kind: "specific-uri"
+          pattern: "/api/v1/.*"
+          max-buckets: 5000
+          tokens-per-bucket: 10
+          refill-qty: 1
+          refill-rate-ms: 100
+        
+        # Upload endpoint rate limiting
+        - kind: "specific-uri"
+          pattern: "/upload/.*"
+          max-buckets: 1000
+          tokens-per-bucket: 2
+          refill-qty: 1
+          refill-rate-ms: 1000
+        
+        # Large file downloads (single-rater)
+        - kind: "any-matching-uri"
+          pattern: ".*\\.(zip|tar|gz|mp4|avi)$"
+          tokens-per-bucket: 5
+          refill-qty: 1
+          refill-rate-ms: 2000
+    
+    # PATH CONTROL for virtual host
+    # -----------------------------
+    # Filters and modifications applied to all domains
+    path-control:
+      # Client request filters (applied before domain routing)
+      request-filters:
+        # Block requests from specific IP ranges
+        - kind: "block-cidr-range"
+          addrs: "192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12"
+      
+      # Upstream request filters (applied after domain routing)
+      upstream-request-filters:
+        # Remove sensitive headers
+        - kind: "remove-header-key-regex"
+          pattern: ".*(authorization|cookie).*"
+        
+        # Add proxy identification
+        - kind: "upsert-header"
+          key: "X-Forwarded-By"
+          value: "Stryvo-VHost"
+        
+        # Add request ID for tracing
+        - kind: "upsert-header"
+          key: "X-Request-ID"
+          value: "stryvo-req-id"
+        
+        # Add real IP header
+        - kind: "upsert-header"
+          key: "X-Real-IP"
+          value: "forwarded"
+      
+      # Upstream response filters (applied to responses from all domains)
+      upstream-response-filters:
+        # Remove server identification
+        - kind: "remove-header-key-regex"
+          pattern: ".*(server|x-powered-by).*"
+        
+        # Add security headers
+        - kind: "upsert-header"
+          key: "X-Content-Type-Options"
+          value: "nosniff"
+        
+        - kind: "upsert-header"
+          key: "X-Frame-Options"
+          value: "DENY"
+        
+        - kind: "upsert-header"
+          key: "X-XSS-Protection"
+          value: "1; mode=block"
+        
+        # Add custom header
+        - kind: "upsert-header"
+          key: "X-Served-By"
+          value: "Stryvo-VHost-ComprehensiveVHost"
+    
+    # CACHING for virtual host
+    # ------------------------
+    # Shared caching configuration across all domains
+    cache:
+      cache-enabled: true
+      cache-ttl: 600 # 10 minutes
+      shard-count: 32
+      cache-dir: "/var/cache/stryvo/vhost"
+      max-file-size: 5242880 # 5MB
+      browser-cache-enabled: true
+      browser-cache-ttl: 3600 # 1 hour
+
+  #--------------------------------------------------------------------------
+  # Service: SimpleVHost
+  # Type: Minimal VHost configuration
+  #--------------------------------------------------------------------------
+  - name: "SimpleVHost"
+    
+    listeners:
+      - addr: "0.0.0.0:8080"
+        offer-h2: false
+      - addr: "0.0.0.0:8443"
+        offer-h2: true
+    
+    domains:
+      "example.com":
+        upstreams:
+          - proxy-addr: "192.168.1.100:8080"
+        ssl-config:
+          cert_path: "./assets/certs/test.local.crt"
+          key_path: "./assets/certs/test.local.key"
+    
+    default-domain:
+      upstreams:
+        - proxy-addr: "127.0.0.1:8080"
+      ssl-config:
+        cert_path: "./assets/certs/test.local.crt"
+        key_path: "./assets/certs/test.local.key"
+
+#------------------------------------------------------------------------------
+# FILE SERVER CONFIGURATIONS
+#------------------------------------------------------------------------------
+# Static file serving services
+
+file-server:
+  #--------------------------------------------------------------------------
+  # Service: MainFileServer
+  # Type: File Server with HTTPS support
+  #--------------------------------------------------------------------------
+  - name: "MainFileServer"
+    
+    # LISTENERS for file server
+    listeners:
+      # HTTP listener on all interfaces, port 9000
+      - addr: "0.0.0.0:9000"
+        offer-h2: false
+      
+      # HTTPS listener on all interfaces, port 9443
+      - addr: "0.0.0.0:9443"
+        tls:
+          cert_path: "./assets/certs/test.local.crt"
+          key_path: "./assets/certs/test.local.key"
+        offer-h2: true
+    
+    # FILE SERVER CONFIGURATION
+    # Root directory from which files will be served
+    # All files within this directory will be accessible
+    # Relative to the working directory of the Stryvo process
+    base-path: "."
+
+  #--------------------------------------------------------------------------
+  # Service: StaticAssets
+  # Type: File Server for static assets
+  #--------------------------------------------------------------------------
+  - name: "StaticAssets"
+    
+    listeners:
+      - addr: "0.0.0.0:9001"
+        offer-h2: false
+    
+    # Serve files from a specific assets directory
+    base-path: "./assets"
+
+  #--------------------------------------------------------------------------
+  # Service: WebRoot
+  # Type: File Server for web content
+  #--------------------------------------------------------------------------
+  - name: "WebRoot"
+    
+    listeners:
+      - addr: "0.0.0.0:9002"
+        offer-h2: false
+    
+    # Serve files from web root directory
+    base-path: "/var/www/html"
+
+#------------------------------------------------------------------------------
+# CONFIGURATION NOTES
+#------------------------------------------------------------------------------
+# 
+# LOAD BALANCING OPTIONS:
+# - RoundRobin: Distributes requests evenly across upstreams
+# - Random: Randomly selects an upstream for each request
+# - FNV: Uses FNV hash of key for consistent selection
+# - Ketama: Uses Ketama consistent hashing for better distribution
+#
+# LOAD BALANCING KEYS:
+# - UriPath: Hash based on the request URI path
+# - SourceAddrAndUriPath: Hash based on client IP and URI path
+#
+# PROTOCOL OPTIONS:
+# - h1-only: HTTP/1.1 only
+# - h2-only: HTTP/2 only
+# - h2-or-h1: HTTP/2 preferred, fallback to HTTP/1.1
+#
+# RATE LIMITING KINDS:
+# - source-ip: Multi-rater with separate buckets per IP
+# - specific-uri: Multi-rater with separate buckets per URI pattern
+# - any-matching-uri: Single-rater shared across all matching URIs
+#
+# PATH CONTROL FILTERS:
+# - block-cidr-range: Block requests from IP ranges
+# - remove-header-key-regex: Remove headers matching regex pattern
+# - upsert-header: Add or update header with fixed value
+#
+# USAGE EXAMPLES:
+# stryvo --config-yaml /path/to/stryvo-config.yaml --validate-configs
+# stryvo --config-yaml /path/to/stryvo-config.yaml
+#
+# This configuration demonstrates 100% feature parity with KDL format
+# and provides comprehensive examples of all Stryvo capabilities.

@@ -1,16 +1,16 @@
 pub mod cli;
 pub mod internal;
 pub mod kdl;
-pub mod nginx;
 pub mod toml;
+pub mod yaml;
 
 use std::fs::read_to_string;
 
 use clap::Parser;
 use cli::Cli;
 
-use crate::config::nginx::Nginx;
 use crate::config::toml::Toml;
+use crate::config::yaml::Yaml;
 
 pub fn render_config() -> internal::Config {
     // To begin with, start with the blank internal config. We will layer on top of that.
@@ -28,7 +28,11 @@ pub fn render_config() -> internal::Config {
 
     let toml_opts = c.config_toml.as_ref().map(Toml::from_path);
 
-    let nginx_opts = c.config_nginx.as_ref().map(Nginx::from_path);
+    let yaml_opts = c.config_yaml.as_ref().map(|yaml_path| {
+        tracing::info!("Loading YAML config from {yaml_path:?}");
+        let yaml_config = Yaml::from_path(yaml_path);
+        yaml_config.into()
+    });
 
     let kdl_opts = c.config_kdl.as_ref().map(|kdl_path| {
         let kdl_contents = read_to_string(kdl_path).unwrap_or_else(|e| {
@@ -49,7 +53,7 @@ pub fn render_config() -> internal::Config {
     //   3. Configuration File Options (lowest priority)
     //
     // Apply in reverse order as we are layering.
-    match (toml_opts, kdl_opts, nginx_opts) {
+    match (toml_opts, kdl_opts, yaml_opts) {
         (Some(tf), None, None) => {
             tracing::info!("Applying TOML options");
             apply_toml(&mut config, &tf);
@@ -58,13 +62,9 @@ pub fn render_config() -> internal::Config {
             tracing::info!("Applying KDL options");
             config = kf;
         }
-        (None, None, Some(nf)) => {
-            tracing::info!("Applying Nginx-like options");
-            config = nf
-                .unwrap_or_else(|e| {
-                    panic!("Error loading Nginx config: {e:?}");
-                })
-                .into();
+        (None, None, Some(yf)) => {
+            tracing::info!("Applying YAML options");
+            config = yf;
         }
         (None, None, None) => {
             tracing::info!("No configuration file provided");
@@ -93,7 +93,7 @@ fn apply_cli(conf: &mut internal::Config, cli: &Cli) {
         threads_per_service,
         config_toml: _,
         config_kdl: _,
-        config_nginx: _,
+        config_yaml: _,
         daemonize,
         upgrade,
         pidfile,

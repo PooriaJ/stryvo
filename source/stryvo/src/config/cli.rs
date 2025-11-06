@@ -18,9 +18,9 @@ pub struct Cli {
     #[arg(long)]
     pub config_kdl: Option<PathBuf>,
 
-    /// Path to the configuration file in Nginx-like format
+    /// Path to the configuration file in YAML format
     #[arg(long)]
-    pub config_nginx: Option<PathBuf>,
+    pub config_yaml: Option<PathBuf>,
 
     /// Number of threads used in the worker pool for EACH service
     #[arg(long)]
