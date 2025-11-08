@@ -14,7 +14,7 @@ use crate::proxy::cache::service::{CacheService, CacheBucket, SccMemoryCache};
 use crate::proxy::cache::persistence::PersistenceConfig;
 use crate::proxy::compression::CompressionStrategy;
 use crate::proxy::service_registry::ServiceRegistry;
-use crate::acme::manager::AcmeManager;
+use crate::acme::manager::{AcmeManager, CertEvent};
 
 /// VHost-aware proxy service that handles multiple domains with SNI certificate selection
 pub struct VHostProxyService {
@@ -201,6 +201,71 @@ impl VHostProxyService {
                         }
                     }
 
+                    // Subscribe to ACME certificate change events and hot-reload TLS
+                    {
+                        let mut rx = acme_manager_arc.subscribe();
+                        let cert_mgr = Arc::clone(&certificate_manager);
+                        let service_name = vhost_config.name.clone();
+                        let configured_domains = vhost_config.domains.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(CertEvent::Installed { domain, cert_path, key_path }) => {
+                                        if configured_domains.contains_key(domain.as_str()) {
+                                            match cert_mgr
+                                                .reload_domain_certificate_with_paths(&domain, cert_path.clone(), key_path.clone())
+                                                .await
+                                            {
+                                                Ok(()) => info!(
+                                                    "[{}] Hot-reloaded installed certificate for domain '{}'",
+                                                    service_name, domain
+                                                ),
+                                                Err(e) => error!(
+                                                    "[{}] Failed to hot-reload installed certificate for '{}': {}",
+                                                    service_name, domain, e
+                                                ),
+                                            }
+                                        } else {
+                                            debug!(
+                                                "[{}] Cert installed for unconfigured domain '{}' — ignoring",
+                                                service_name, domain
+                                            );
+                                        }
+                                    }
+                                    Ok(CertEvent::Renewed { domain, cert_path, key_path }) => {
+                                        if configured_domains.contains_key(domain.as_str()) {
+                                            match cert_mgr
+                                                .reload_domain_certificate_with_paths(&domain, cert_path.clone(), key_path.clone())
+                                                .await
+                                            {
+                                                Ok(()) => info!(
+                                                    "[{}] Hot-reloaded renewed certificate for domain '{}'",
+                                                    service_name, domain
+                                                ),
+                                                Err(e) => error!(
+                                                    "[{}] Failed to hot-reload renewed certificate for '{}': {}",
+                                                    service_name, domain, e
+                                                ),
+                                            }
+                                        } else {
+                                            debug!(
+                                                "[{}] Cert renewed for unconfigured domain '{}' — ignoring",
+                                                service_name, domain
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Receiver errors only occur on channel closed or lag; continue listening
+                                        debug!(
+                                            "[{}] Cert event receiver error: {:?} — continuing",
+                                            service_name, e
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                    }
+
                     Some(acme_manager_arc)
                 }
             } else {
@@ -373,87 +438,10 @@ impl ProxyHttp for VHostProxyService {
     /// Handle request filtering phase
     /// This is where we extract SNI information and prepare for certificate selection
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        
         // Note: SNI extraction and certificate selection is handled by the TLS callback
-        // in certificate_manager.rs during the TLS handshake, not here in the HTTP layer
-        
-        // Trigger ACME certificate acquisition on first request (if not already done)
-        if let Some(acme_manager) = &self.acme_manager {
-            // Use atomic compare-and-swap to ensure this only runs once
-            if !self.acme_triggered.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                // Check if there are pending domains
-                let pending_count = acme_manager.pending_domains.read().await.len();
-                if pending_count > 0 {
-                    info!("First request received - triggering ACME certificate acquisition for {} pending domains", pending_count);
-                    
-                    // Clone what we need for the background task
-                    let acme_manager_clone = acme_manager.clone();
-                    let cert_manager_clone = self.certificate_manager.clone();
-                    let vhost_name = self.vhost_config.name.clone();
-                    
-                    // Spawn acquisition in Pingora's runtime
-                    tokio::spawn(async move {
-                        info!("ACME acquisition task started for service '{}'", vhost_name);
-                        
-                        let domains_to_acquire = {
-                            let mut pending = acme_manager_clone.pending_domains.write().await;
-                            pending.drain(..).collect::<Vec<_>>()
-                        };
-                        
-                        for domain in domains_to_acquire {
-                            if domain == "default" {
-                                continue;
-                            }
-                            
-                            // Record existing certificate info for logging decisions
-                            let previous_info = acme_manager_clone.get_certificate_info(&domain).await;
-                            info!("Checking certificate state for domain: {} (obtaining if needed)", domain);
-                            
-                            match acme_manager_clone.get_certificate(&[domain.clone()]).await {
-                                Ok(cert_info) => {
-                                    let days_left = cert_info.days_until_expiration();
-                                    if let Some(prev) = previous_info {
-                                        if prev.serial_number == cert_info.serial_number {
-                                            info!(
-                                                "Reused cached certificate for domain '{}' (serial: {}, {} days left)",
-                                                domain, cert_info.serial_number, days_left
-                                            );
-                                        } else {
-                                            info!(
-                                                "Renewed certificate for domain '{}' (old serial: {}, new serial: {}, {} days left)",
-                                                domain, prev.serial_number, cert_info.serial_number, days_left
-                                            );
-                                        }
-                                    } else {
-                                        info!(
-                                            "Obtained new certificate for domain '{}' (serial: {}, {} days left)",
-                                            domain, cert_info.serial_number, days_left
-                                        );
-                                    }
-                                    // Hot-reload the new certificate into the TLS manager using explicit paths
-                                    match cert_manager_clone
-                                        .reload_domain_certificate_with_paths(&domain, cert_info.cert_path.clone(), cert_info.key_path.clone())
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            info!("Certificate hot-reload applied for domain '{}'", domain);
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to hot-reload certificate for domain '{}': {}", domain, e);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Failed to obtain ACME certificate for domain '{}': {}", domain, e);
-                                }
-                            }
-                        }
-                        
-                        info!("ACME certificate acquisition completed for service '{}'", vhost_name);
-                    });
-                }
-            }
-        }
+        // in certificate_manager.rs during the TLS handshake, not here in the HTTP layer.
+        // ACME issuance/renewal is now handled by the ACME manager's daily background job
+        // scheduled at local midnight to avoid per-request overhead.
 
         // Handle ACME HTTP-01 challenges first (before cache lookup)
         let uri_path = session.req_header().uri.path();

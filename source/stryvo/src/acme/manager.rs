@@ -1,14 +1,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::time::{interval, Duration};
+use tokio::sync::{RwLock, broadcast};
+use tokio::time::Duration;
+use chrono::TimeZone;
 use thiserror::Error;
 use tracing::{info, warn, error, debug};
 
 use super::config::{AcmeConfig, ChallengeType, KeyType};
 use super::certificate::{CertificateInfo, CertificateError};
 use super::challenge::{HttpChallengeServer, ChallengeError};
+
+/// Events emitted when certificates change, allowing TLS to hot-reload
+#[derive(Debug, Clone)]
+pub enum CertEvent {
+    Installed { domain: String, cert_path: PathBuf, key_path: PathBuf },
+    Renewed { domain: String, cert_path: PathBuf, key_path: PathBuf },
+}
 
 /// ACME certificate manager
 #[derive(Debug)]
@@ -23,6 +31,8 @@ pub struct AcmeManager {
     renewal_task: Option<tokio::task::JoinHandle<()>>,
     /// Domains pending initial certificate acquisition
     pub(crate) pending_domains: Arc<RwLock<Vec<String>>>,
+    /// Broadcast channel for certificate change notifications
+    cert_event_tx: broadcast::Sender<CertEvent>,
 }
 
 /// Errors that can occur during ACME operations
@@ -67,6 +77,7 @@ impl AcmeManager {
         } else {
             None
         };
+        let (cert_event_tx, _rx) = broadcast::channel(100);
         
         Self {
             config,
@@ -74,6 +85,7 @@ impl AcmeManager {
             challenge_server,
             renewal_task: None,
             pending_domains: Arc::new(RwLock::new(Vec::new())),
+            cert_event_tx,
         }
     }
     
@@ -107,6 +119,11 @@ impl AcmeManager {
         
         info!("ACME manager initialized successfully");
         Ok(())
+    }
+
+    /// Subscribe to certificate change events
+    pub fn subscribe(&self) -> broadcast::Receiver<CertEvent> {
+        self.cert_event_tx.subscribe()
     }
     
     /// Get or create a certificate for the given domains
@@ -243,62 +260,27 @@ impl AcmeManager {
         let certificates = Arc::clone(&self.certificates);
         let pending_domains = Arc::clone(&self.pending_domains);
         let config = self.config.clone();
-        
+        let event_tx = self.cert_event_tx.clone();
+
         let handle = tokio::spawn(async move {
-            // Wait 5 seconds before first run to allow server to start
-            info!("ACME renewal task starting - waiting 5 seconds for server to be ready...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            info!("ACME renewal task ready - checking for pending domains and renewals");
-            
-            // First, acquire certificates for pending domains
-            let domains_to_acquire = {
-                let mut pending = pending_domains.write().await;
-                let domains = pending.drain(..).collect::<Vec<_>>();
-                domains
-            };
-            
-            if !domains_to_acquire.is_empty() {
-                info!("Found {} pending domains for initial certificate acquisition", domains_to_acquire.len());
-                
-                for domain in domains_to_acquire {
-                    if domain == "default" {
-                        info!("Skipping ACME certificate acquisition for default domain");
-                        continue;
-                    }
-                    
-                    info!("Acquiring initial ACME certificate for domain: {}", domain);
-                    
-                    // Create a temporary manager for acquisition and preload existing certs
-                    let mut manager = AcmeManager::new(config.clone());
-                    if let Err(e) = manager.create_directories().await {
-                        error!("Failed to create directories for {}: {}", domain, e);
-                        continue;
-                    }
-                    // Load any existing certificates to respect renewal thresholds
-                    if let Err(e) = manager.load_existing_certificates().await {
-                        warn!("Failed to load existing certificates before acquisition for {}: {}", domain, e);
-                    }
-                    
-                    match manager.get_certificate(&[domain.clone()]).await {
-                        Ok(cert_info) => {
-                            let mut certs = certificates.write().await;
-                            certs.insert(domain.clone(), cert_info.clone());
-                            info!("Installed certificate for {} (expires in {} days)", domain, cert_info.days_until_expiration());
-                        }
-                        Err(e) => {
-                            error!("Failed to acquire initial certificate for {}: {}", domain, e);
-                        }
-                    }
-                }
-            }
-            
-            // Now start the regular renewal check loop
-            let mut interval = interval(Duration::from_secs(24 * 60 * 60)); // Check daily
-            
+            // Align first run to local midnight to avoid per-request overhead
+            #[allow(deprecated)]
+            let now = chrono::Local::now();
+            let today = now.date_naive();
+            let next_day = today.succ_opt().unwrap_or(today + chrono::Days::new(1));
+            let next_midnight_naive = next_day.and_hms_opt(0, 0, 0).unwrap();
+            let next_midnight = chrono::Local.from_local_datetime(&next_midnight_naive).unwrap();
+            let secs_until_midnight = (next_midnight - now).num_seconds().max(0);
+
+            info!(
+                "ACME renewal task scheduled: sleeping {}s until local midnight",
+                secs_until_midnight
+            );
+            tokio::time::sleep(Duration::from_secs(secs_until_midnight as u64)).await;
+
             loop {
-                interval.tick().await;
-                
-                debug!("Running certificate renewal check");
+                info!("Running daily ACME certificate check at local midnight");
+
                 // Log current certificate statuses for audit
                 {
                     let certificates = certificates.read().await;
@@ -312,39 +294,119 @@ impl AcmeManager {
                         );
                     }
                 }
-                
+
+                // Process any pending domains: acquire only if missing or under threshold
+                let domains_to_acquire = {
+                    let mut pending = pending_domains.write().await;
+                    pending.drain(..).collect::<Vec<_>>()
+                };
+
+                for domain in domains_to_acquire {
+                    if domain == "default" { continue; }
+
+                    let existing = {
+                        let certs = certificates.read().await;
+                        certs.get(&domain).cloned()
+                    };
+
+                    let should_acquire = match existing {
+                        None => {
+                            info!("No existing certificate for '{}' — acquiring", domain);
+                            true
+                        }
+                        Some(info) => {
+                            let days_left = info.days_until_expiration();
+                            if info.needs_renewal(config.renewal_days) {
+                                info!(
+                                    "Certificate for '{}' near expiration ({} days < {} days) — acquiring",
+                                    domain, days_left, config.renewal_days
+                                );
+                                true
+                            } else {
+                                info!(
+                                    "Certificate for '{}' is sufficiently valid ({} days ≥ {} days) — skipping",
+                                    domain, days_left, config.renewal_days
+                                );
+                                false
+                            }
+                        }
+                    };
+
+                    if should_acquire {
+                        let mut manager = AcmeManager::new(config.clone());
+                        if let Err(e) = manager.create_directories().await {
+                            error!("Failed to create directories for {}: {}", domain, e);
+                            continue;
+                        }
+                        if let Err(e) = manager.load_existing_certificates().await {
+                            warn!("Failed to load existing certificates before acquisition for {}: {}", domain, e);
+                        }
+                        match manager.get_certificate(&[domain.clone()]).await {
+                            Ok(cert_info) => {
+                                let mut certs = certificates.write().await;
+                                certs.insert(domain.clone(), cert_info.clone());
+                                info!(
+                                    "Installed certificate for {} (expires in {} days)",
+                                    domain,
+                                    cert_info.days_until_expiration()
+                                );
+                                // Notify listeners for hot-reload
+                                let _ = event_tx.send(CertEvent::Installed {
+                                    domain: domain.clone(),
+                                    cert_path: cert_info.cert_path.clone(),
+                                    key_path: cert_info.key_path.clone(),
+                                });
+                            }
+                            Err(e) => {
+                                error!("Failed to acquire initial/renewed certificate for {}: {}", domain, e);
+                            }
+                        }
+                    }
+                }
+
+                // Renew certificates already managed if under threshold
                 let certs_to_renew = {
                     let certificates = certificates.read().await;
-                    certificates.iter()
+                    certificates
+                        .iter()
                         .filter(|(_, cert)| cert.needs_renewal(config.renewal_days))
                         .map(|(domain, cert)| (domain.clone(), cert.domains.clone()))
                         .collect::<Vec<_>>()
                 };
-                
+
                 for (primary_domain, domains) in certs_to_renew {
                     info!("Renewing certificate for {}", primary_domain);
-                    
-                    // Create a temporary manager for renewal
                     let mut manager = AcmeManager::new(config.clone());
                     if let Err(e) = manager.create_directories().await {
                         error!("Failed to create directories for {}: {}", primary_domain, e);
                         continue;
                     }
-                    
                     match manager.obtain_certificate(&domains).await {
                         Ok(new_cert) => {
                             let mut certificates = certificates.write().await;
+                            // Clone paths before moving cert into map
+                            let cert_path = new_cert.cert_path.clone();
+                            let key_path = new_cert.key_path.clone();
                             certificates.insert(primary_domain.clone(), new_cert);
                             info!("Successfully renewed certificate for {}", primary_domain);
+                            // Notify listeners for hot-reload
+                            let _ = event_tx.send(CertEvent::Renewed {
+                                domain: primary_domain.clone(),
+                                cert_path,
+                                key_path,
+                            });
                         }
                         Err(e) => {
                             error!("Failed to renew certificate for {}: {}", primary_domain, e);
                         }
                     }
                 }
+
+                // Sleep exactly 24 hours to hit next midnight consistently
+                tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
             }
         });
-        
+
         self.renewal_task = Some(handle);
     }
     
