@@ -10,6 +10,7 @@ use crate::proxy::{
     rate_limiting::AllRateConfig,
     request_selector::{null_selector, RequestSelector},
 };
+use crate::acme::config::AcmeConfig;
 
 /// stryvo's internal configuration
 #[derive(Debug, Clone)]
@@ -24,6 +25,7 @@ pub struct Config {
     pub vhost_proxies: Vec<VHostConfig>,
     pub file_servers: Vec<FileServerConfig>,
     pub logging: crate::logging::LoggingConfig,
+    pub acme: AcmeConfig,
 }
 
 impl Config {
@@ -165,19 +167,25 @@ impl VHostConfig {
 
         // Validate SSL configuration if present
         if let Some(ssl_config) = &domain_config.ssl_config {
-            if ssl_config.cert_path.as_os_str().is_empty() {
-                return Err("SSL certificate path cannot be empty".to_string());
-            }
-            if ssl_config.key_path.as_os_str().is_empty() {
-                return Err("SSL key path cannot be empty".to_string());
-            }
-            
-            // Check if certificate files exist (basic validation)
-            if !ssl_config.cert_path.exists() {
-                return Err(format!("SSL certificate file does not exist: {:?}", ssl_config.cert_path));
-            }
-            if !ssl_config.key_path.exists() {
-                return Err(format!("SSL key file does not exist: {:?}", ssl_config.key_path));
+            if ssl_config.auto_ssl {
+                // For auto SSL, we don't need to validate cert/key paths as they will be managed automatically
+                tracing::debug!("Auto SSL enabled for domain: {}", domain_name);
+            } else {
+                // For manual SSL, validate cert/key paths
+                if ssl_config.cert_path.as_os_str().is_empty() {
+                    return Err("SSL certificate path cannot be empty when auto_ssl is disabled".to_string());
+                }
+                if ssl_config.key_path.as_os_str().is_empty() {
+                    return Err("SSL key path cannot be empty when auto_ssl is disabled".to_string());
+                }
+                
+                // Check if certificate files exist (basic validation)
+                if !ssl_config.cert_path.exists() {
+                    return Err(format!("SSL certificate file does not exist: {:?}", ssl_config.cert_path));
+                }
+                if !ssl_config.key_path.exists() {
+                    return Err(format!("SSL key file does not exist: {:?}", ssl_config.key_path));
+                }
             }
         }
 
@@ -284,6 +292,8 @@ pub struct DomainConfig {
 pub struct TlsConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+    /// Enable automatic SSL certificate management via ACME
+    pub auto_ssl: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -356,6 +366,7 @@ impl Default for Config {
             upgrade: false,
             upgrade_socket: None,
             logging: crate::logging::LoggingConfig::default(),
+            acme: AcmeConfig::default(),
         }
     }
 }

@@ -87,6 +87,7 @@ mod e2e_vhost_tests {
                 ssl_config: Some(TlsConfig {
                     cert_path,
                     key_path,
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },
@@ -178,10 +179,12 @@ mod e2e_vhost_tests {
         domains.insert("example.com".to_string(), (example_port, Some(TlsConfig {
             cert_path: cert_path.clone(),
             key_path: key_path.clone(),
+            auto_ssl: false,
         })));
         domains.insert("api.example.com".to_string(), (api_port, Some(TlsConfig {
             cert_path,
             key_path,
+            auto_ssl: false,
         })));
         
         let _vhost_config = create_test_vhost_config(

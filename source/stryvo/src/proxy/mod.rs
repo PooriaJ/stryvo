@@ -123,6 +123,7 @@ pub fn stryvo_proxy_service(
 /// Create a VHost proxy service with SNI certificate selection and Host header routing
 pub fn stryvo_vhost_service(
     conf: crate::config::internal::VHostConfig,
+    acme_config: Option<crate::acme::config::AcmeConfig>,
     server: &Server,
 ) -> Box<dyn pingora::services::Service> {
     use tokio::runtime::Runtime;
@@ -132,7 +133,7 @@ pub fn stryvo_vhost_service(
     
     // Create the VHost proxy service with proper error handling
     let vhost_service = rt.block_on(async {
-        match VHostProxyService::new(conf.clone()).await {
+        match VHostProxyService::new(conf.clone(), acme_config).await {
             Ok(service) => {
                 tracing::info!(
                     "Successfully created VHost proxy service '{}' with {} domains",
@@ -151,6 +152,47 @@ pub fn stryvo_vhost_service(
             }
         }
     });
+
+    // Prepare TLS settings for listeners BEFORE moving vhost_service into the proxy
+    // This ensures the SNI callback uses the SAME certificate manager as the service
+    use crate::config::internal::ListenerKind;
+    let mut prepared_tls: Vec<(String, pingora::listeners::tls::TlsSettings)> = Vec::new();
+    let mut prepared_tcp: Vec<String> = Vec::new();
+    let mut prepared_uds: Vec<String> = Vec::new();
+
+    for list_cfg in &conf.listeners {
+        match &list_cfg.source {
+            ListenerKind::Tcp { addr, tls: Some(tls_cfg), ssl: _, offer_h2 } => {
+                let cert_path = tls_cfg
+                    .cert_path
+                    .to_str()
+                    .expect("cert path should be utf8");
+                let key_path = tls_cfg.key_path.to_str().expect("key path should be utf8");
+
+                let mut settings = pingora::listeners::tls::TlsSettings::intermediate(cert_path, key_path)
+                    .expect("adding TLS listener shouldn't fail");
+                if *offer_h2 {
+                    settings.enable_h2();
+                }
+                prepared_tls.push((addr.clone(), settings));
+            }
+            ListenerKind::Tcp { addr, tls: None, ssl: true, offer_h2 } => {
+                let mut settings = rt
+                    .block_on(async { vhost_service.create_sni_tls_settings().await })
+                    .expect("Failed to create SNI TLS settings");
+                if *offer_h2 {
+                    settings.enable_h2();
+                }
+                prepared_tls.push((addr.clone(), settings));
+            }
+            ListenerKind::Tcp { addr, tls: None, ssl: false, offer_h2: _ } => {
+                prepared_tcp.push(addr.clone());
+            }
+            ListenerKind::Uds(path) => {
+                prepared_uds.push(path.to_str().unwrap().to_string());
+            }
+        }
+    }
     
     // Create the Pingora HTTP proxy service with VHost support
     let mut proxy_service = pingora_proxy::http_proxy_service_with_name(
@@ -158,9 +200,20 @@ pub fn stryvo_vhost_service(
         vhost_service,
         &conf.name,
     );
-    
-    // Add listeners with VHost-aware TLS settings
-    populate_vhost_listeners(conf.listeners.clone(), &mut proxy_service, &conf);
+
+    // Add prepared listeners (TLS, TCP, UDS)
+    for (addr, mut settings) in prepared_tls {
+        proxy_service.add_tls_with_settings(&addr, None, settings);
+        tracing::info!("Added VHost TLS/SSL listener on {}", addr);
+    }
+    for addr in prepared_tcp {
+        proxy_service.add_tcp(&addr);
+        tracing::info!("Added VHost TCP listener on {}", addr);
+    }
+    for path in prepared_uds {
+        proxy_service.add_uds(&path, None);
+        tracing::info!("Added VHost UDS listener on {}", path);
+    }
     
     tracing::info!(
         "VHost proxy service '{}' configured and ready to serve {} domains",
@@ -169,107 +222,6 @@ pub fn stryvo_vhost_service(
     );
     
     Box::new(proxy_service)
-}
-
-/// Populate listeners for VHost service with SNI-aware TLS settings
-fn populate_vhost_listeners<T>(
-    listeners: Vec<crate::config::internal::ListenerConfig>,
-    service: &mut pingora_core::services::listening::Service<T>,
-    vhost_config: &crate::config::internal::VHostConfig,
-) {
-    use crate::config::internal::ListenerKind;
-    use tokio::runtime::Runtime;
-    use crate::proxy::vhost::VHostProxyService;
-    
-    // Create a runtime for async operations
-    let rt = Runtime::new().expect("Failed to create runtime for TLS settings");
-    
-    for list_cfg in listeners {
-        match list_cfg.source {
-            ListenerKind::Tcp {
-                addr,
-                tls: Some(tls_cfg),
-                ssl: _,  // Legacy mode - ignore SSL flag when TLS config is present
-                offer_h2,
-            } => {
-                let cert_path = tls_cfg
-                    .cert_path
-                    .to_str()
-                    .expect("cert path should be utf8");
-                let key_path = tls_cfg.key_path.to_str().expect("key path should be utf8");
-
-                // Create TLS settings for VHost service (legacy mode)
-                // Note: The actual SNI certificate selection is handled by the VHostProxyService
-                // during the TLS handshake process through the certificate manager
-                let mut settings = pingora::listeners::tls::TlsSettings::intermediate(cert_path, key_path)
-                    .expect("adding TLS listener shouldn't fail");
-                
-                if offer_h2 {
-                    settings.enable_h2();
-                }
-
-                service.add_tls_with_settings(&addr, None, settings);
-                
-                tracing::info!("Added VHost TLS listener on {} with SNI support (legacy mode)", addr);
-            }
-            ListenerKind::Tcp {
-                addr,
-                tls: None,
-                ssl: true,
-                offer_h2,
-            } => {
-                // New SSL flag mode - create SNI-aware TLS settings
-                // This will use the certificate manager's SNI callback for dynamic certificate selection
-                let vhost_service_result = rt.block_on(async {
-                    VHostProxyService::new(vhost_config.clone()).await
-                });
-                
-                match vhost_service_result {
-                    Ok(vhost_service) => {
-                        let sni_settings_result = rt.block_on(async {
-                            vhost_service.create_sni_tls_settings().await
-                        });
-                        
-                        match sni_settings_result {
-                            Ok(mut settings) => {
-                                if offer_h2 {
-                                    settings.enable_h2();
-                                }
-                                
-                                service.add_tls_with_settings(&addr, None, settings);
-                                tracing::info!("Added VHost SSL listener on {} with SNI-based certificate selection", addr);
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to create SNI TLS settings: {}", e);
-                                panic!("Failed to create SNI TLS settings: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to create VHost service for SNI settings: {}", e);
-                        panic!("Failed to create VHost service for SNI settings: {}", e);
-                    }
-                }
-            }
-            ListenerKind::Tcp {
-                addr,
-                tls: None,
-                ssl: false,
-                offer_h2,
-            } => {
-                if offer_h2 {
-                    panic!("Unsupported configuration: {addr:?} configured without SSL, but H2 enabled which requires SSL");
-                }
-                service.add_tcp(&addr);
-                tracing::info!("Added VHost TCP listener on {}", addr);
-            }
-            ListenerKind::Uds(path) => {
-                let path = path.to_str().unwrap();
-                service.add_uds(path, None);
-                tracing::info!("Added VHost UDS listener on {}", path);
-            }
-        }
-    }
 }
 
 impl<BS> StryvoProxyService<BS>

@@ -6,7 +6,7 @@ Stryvo is a high-performance reverse proxy application built on the [Pingora](ht
 ## Features
 
 - **High Performance**: Leverages **Pingora** for exceptional speed and efficiency.
-- **Flexible Configuration**: Supports KDL, TOML, and Nginx-style configuration formats.
+- **Flexible Configuration**: Supports KDL, TOML, and YAML configuration formats.
 - **TLS Support**: Full TLS termination for secure HTTP/1.x and HTTP/2 connections.
 - **Load Balancing**: Implements Round Robin, Random, FNV, and Ketama strategies.
 - **Rate Limiting**: Configurable limits based on source IP, URIs, or URI patterns.
@@ -16,7 +16,7 @@ Stryvo is a high-performance reverse proxy application built on the [Pingora](ht
 - **Caching**: Proxy-side and browser caching to reduce latency and server load.
 - **Compression**: Supports Gzip, Brotli, and Zstd for efficient data transfer.
 - **Logging**: Comprehensive access and error logging for monitoring and debugging.
-- **Nginx Parser**: Use familiar Nginx-style syntax for configuration.
+
 - **Docker Support**: Includes Dockerfile and docker-compose for easy deployment.
 
 ## Current State
@@ -113,7 +113,7 @@ This maps ports 80 and 443, mounts configuration and log directories, and runs S
 
 ## Configuration
 
-Stryvo supports three configuration formats: KDL, TOML, and Nginx-style syntax. KDL is the recommended format for its clarity and flexibility.
+Stryvo supports three configuration formats: KDL, TOML, and YAML. KDL is the recommended format for its clarity and flexibility, while YAML provides a familiar and readable alternative.
 
 ### KDL Configuration
 
@@ -195,29 +195,32 @@ kind = "Tcp"
 addr = "0.0.0.0:8080"
 ```
 
-### Nginx-Style Configuration
+### YAML Configuration
 
-Stryvo parses Nginx-like syntax for users familiar with Nginx. Example:
+YAML provides a clean, readable configuration format. Example:
 
-```nginx
-system {
-    threads_per_service 8;
-    daemonize false;
-    pid_file "/tmp/stryvo.pidfile";
-}
+```yaml
+system:
+  threads-per-service: 8
+  logging:
+    access-log: "stryvo-access.log"
+    error-log: "stryvo-error.log"
+    level: "INFO"
+    enabled: true
 
-http {
-    server {
-        server_name Example1;
-        listen 0.0.0.0:8680;
-        location / {
-            proxy_pass backend_onevariable;
-            deny 192.168.0.0/16;
-            add_header x-with-love-from "stryvo";
-        }
-    }
-}
+basic-proxy:
+  - name: "Example1"
+    listeners:
+      - addr: "0.0.0.0:8080"
+        offer-h2: false
+    connectors:
+      - proxy-addr: "backend.example.com:80"
+    cache:
+      cache-enabled: false
+      cache-ttl: 300
 ```
+
+
 
 ### Command Line Options
 
@@ -226,7 +229,7 @@ Run Stryvo with various options:
 ```bash
 stryvo --config-kdl /path/to/config.kdl
 stryvo --config-toml /path/to/config.toml
-stryvo --config-nginx /path/to/config.nginx
+stryvo --config-yaml /path/to/config.yaml
 ```
 
 Use `stryvo --help` for a full list of options.

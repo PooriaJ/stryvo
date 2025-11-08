@@ -717,6 +717,7 @@ fn extract_ssl_config(
     Ok(TlsConfig {
         cert_path,
         key_path,
+        auto_ssl: false, // Default to false for KDL format
     })
 }
 
@@ -988,6 +989,7 @@ fn extract_listener(
                         tls: Some(TlsConfig {
                             cert_path: cpath.into(),
                             key_path: kpath.into(),
+                            auto_ssl: false, // Default to false for KDL format
                         }),
                         ssl: true,  // Legacy mode implies SSL
                         offer_h2: offer_h2.unwrap_or(true),

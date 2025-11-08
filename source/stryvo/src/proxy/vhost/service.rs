@@ -14,6 +14,7 @@ use crate::proxy::cache::service::{CacheService, CacheBucket, SccMemoryCache};
 use crate::proxy::cache::persistence::PersistenceConfig;
 use crate::proxy::compression::CompressionStrategy;
 use crate::proxy::service_registry::ServiceRegistry;
+use crate::acme::manager::AcmeManager;
 
 /// VHost-aware proxy service that handles multiple domains with SNI certificate selection
 pub struct VHostProxyService {
@@ -25,12 +26,16 @@ pub struct VHostProxyService {
     pub vhost_config: VHostConfig,
     /// Cache service for internal caching
     pub cache_service: Option<Arc<CacheService>>,
+    /// ACME manager for automatic SSL certificate management
+    pub acme_manager: Option<Arc<AcmeManager>>,
+    /// Flag to track if ACME acquisition has been triggered
+    acme_triggered: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl VHostProxyService {
     /// Create a new VHostProxyService from configuration
     /// This properly initializes the service with certificate management and routing
-    pub async fn new(vhost_config: VHostConfig) -> Result<Self> {
+    pub async fn new(vhost_config: VHostConfig, acme_config: Option<crate::acme::config::AcmeConfig>) -> Result<Self> {
         // Validate the configuration first
         if let Err(e) = vhost_config.validate() {
             error!("VHost configuration validation failed: {}", e);
@@ -103,11 +108,120 @@ impl VHostProxyService {
             None
         };
 
+        // Initialize ACME manager if auto_ssl is enabled for any domain and ACME config is provided
+        let acme_manager = if Self::has_auto_ssl_domains(&vhost_config) && acme_config.is_some() {
+            let acme_config = acme_config.unwrap();
+            
+            if acme_config.enabled {
+                info!("Auto SSL domains detected and ACME enabled - initializing ACME manager for service '{}'", vhost_config.name);
+                
+                let mut acme_manager = AcmeManager::new(acme_config.clone());
+                
+                // Initialize the ACME manager
+                if let Err(e) = acme_manager.initialize().await {
+                    error!("Failed to initialize ACME manager for service '{}': {}", vhost_config.name, e);
+                    warn!("Continuing without ACME manager - auto SSL domains will use bootstrap certificates");
+                    None
+                } else {
+                    info!("ACME manager initialized successfully for service '{}'", vhost_config.name);
+                    
+                    // Collect domains that need certificates
+                    let auto_ssl_domains: Vec<String> = vhost_config.domains.iter()
+                        .filter_map(|(name, config)| {
+                            if config.ssl_config.as_ref().map(|s| s.auto_ssl).unwrap_or(false) {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    
+                    if !auto_ssl_domains.is_empty() {
+                        info!("Auto SSL enabled for {} domain(s): {:?}", auto_ssl_domains.len(), auto_ssl_domains);
+                        
+                        // Filter domains: only mark missing or near-expiration certificates (< renewal_days)
+                        let mut pending_domains: Vec<String> = Vec::new();
+                        for domain in auto_ssl_domains.iter() {
+                            if let Some(info) = acme_manager.get_certificate_info(domain).await {
+                                let days_left = info.days_until_expiration();
+                                let threshold = acme_config.renewal_days as i64;
+                                if info.needs_renewal(acme_config.renewal_days) {
+                                    info!(
+                                        "Auto-SSL: cached certificate for '{}' near expiration ({} days left < {} days); marking for renewal",
+                                        domain, days_left, threshold
+                                    );
+                                    pending_domains.push(domain.clone());
+                                } else {
+                                    info!(
+                                        "Auto-SSL: using cached certificate for '{}' ({} days left ≥ {} days); not marking as pending",
+                                        domain, days_left, threshold
+                                    );
+                                }
+                            } else {
+                                info!("Auto-SSL: no cached certificate found for '{}' — marking for acquisition", domain);
+                                pending_domains.push(domain.clone());
+                            }
+                        }
+                        
+                        if !pending_domains.is_empty() {
+                            acme_manager.add_pending_domains(pending_domains.clone()).await;
+                            info!(
+                                "Added {} domain(s) to ACME manager for acquisition/renewal: {:?}",
+                                pending_domains.len(), pending_domains
+                            );
+                        } else {
+                            info!("No domains require ACME acquisition or renewal at startup");
+                        }
+                    }
+                    
+                    // Create ACME manager arc after adding pending domains
+                    let acme_manager_arc = Arc::new(acme_manager);
+
+                    // Eagerly install any existing ACME certificates into the TLS manager
+                    let existing_certs = acme_manager_arc.list_certificates().await;
+                    if !existing_certs.is_empty() {
+                        info!(
+                            "Installing {} existing ACME certificate(s) into TLS manager for service '{}'",
+                            existing_certs.len(), vhost_config.name
+                        );
+                        for cert in existing_certs {
+                            if let Some(primary) = cert.primary_domain() {
+                                if vhost_config.domains.contains_key(primary.as_str()) {
+                                    match certificate_manager
+                                        .reload_domain_certificate_with_paths(&primary, cert.cert_path.clone(), cert.key_path.clone())
+                                        .await
+                                    {
+                                        Ok(()) => info!("Installed existing certificate for domain '{}'", primary),
+                                        Err(e) => error!("Failed to install existing certificate for domain '{}': {}", primary, e),
+                                    }
+                                } else {
+                                    debug!("Existing certificate '{}' not mapped to a configured domain; skipping", primary);
+                                }
+                            }
+                        }
+                    }
+
+                    Some(acme_manager_arc)
+                }
+            } else {
+                info!("Auto SSL domains detected but ACME is disabled - using bootstrap certificates only");
+                None
+            }
+        } else if Self::has_auto_ssl_domains(&vhost_config) {
+            // Downgrade to info: some deployments may pre-provision certs without ACME
+            info!("Auto SSL domains detected but no ACME configuration provided - using bootstrap certificates only");
+            None
+        } else {
+            None
+        };
+
         Ok(Self {
             certificate_manager,
             vhost_router,
             vhost_config,
             cache_service,
+            acme_manager,
+            acme_triggered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -137,7 +251,30 @@ impl VHostProxyService {
             })
     }
 
+    /// Check if any domains in the VHost configuration have auto_ssl enabled
+    fn has_auto_ssl_domains(vhost_config: &VHostConfig) -> bool {
+        // Check default domain
+        if let Some(ssl_config) = &vhost_config.default_domain.ssl_config {
+            if ssl_config.auto_ssl {
+                return true;
+            }
+        }
+        
+        // Check all configured domains
+        for domain_config in vhost_config.domains.values() {
+            if let Some(ssl_config) = &domain_config.ssl_config {
+                if ssl_config.auto_ssl {
+                    return true;
+                }
+            }
+        }
+        
+        false
+    }
+
 }
+
+
 
 #[async_trait]
 impl ProxyHttp for VHostProxyService {
@@ -239,6 +376,131 @@ impl ProxyHttp for VHostProxyService {
         
         // Note: SNI extraction and certificate selection is handled by the TLS callback
         // in certificate_manager.rs during the TLS handshake, not here in the HTTP layer
+        
+        // Trigger ACME certificate acquisition on first request (if not already done)
+        if let Some(acme_manager) = &self.acme_manager {
+            // Use atomic compare-and-swap to ensure this only runs once
+            if !self.acme_triggered.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // Check if there are pending domains
+                let pending_count = acme_manager.pending_domains.read().await.len();
+                if pending_count > 0 {
+                    info!("First request received - triggering ACME certificate acquisition for {} pending domains", pending_count);
+                    
+                    // Clone what we need for the background task
+                    let acme_manager_clone = acme_manager.clone();
+                    let cert_manager_clone = self.certificate_manager.clone();
+                    let vhost_name = self.vhost_config.name.clone();
+                    
+                    // Spawn acquisition in Pingora's runtime
+                    tokio::spawn(async move {
+                        info!("ACME acquisition task started for service '{}'", vhost_name);
+                        
+                        let domains_to_acquire = {
+                            let mut pending = acme_manager_clone.pending_domains.write().await;
+                            pending.drain(..).collect::<Vec<_>>()
+                        };
+                        
+                        for domain in domains_to_acquire {
+                            if domain == "default" {
+                                continue;
+                            }
+                            
+                            // Record existing certificate info for logging decisions
+                            let previous_info = acme_manager_clone.get_certificate_info(&domain).await;
+                            info!("Checking certificate state for domain: {} (obtaining if needed)", domain);
+                            
+                            match acme_manager_clone.get_certificate(&[domain.clone()]).await {
+                                Ok(cert_info) => {
+                                    let days_left = cert_info.days_until_expiration();
+                                    if let Some(prev) = previous_info {
+                                        if prev.serial_number == cert_info.serial_number {
+                                            info!(
+                                                "Reused cached certificate for domain '{}' (serial: {}, {} days left)",
+                                                domain, cert_info.serial_number, days_left
+                                            );
+                                        } else {
+                                            info!(
+                                                "Renewed certificate for domain '{}' (old serial: {}, new serial: {}, {} days left)",
+                                                domain, prev.serial_number, cert_info.serial_number, days_left
+                                            );
+                                        }
+                                    } else {
+                                        info!(
+                                            "Obtained new certificate for domain '{}' (serial: {}, {} days left)",
+                                            domain, cert_info.serial_number, days_left
+                                        );
+                                    }
+                                    // Hot-reload the new certificate into the TLS manager using explicit paths
+                                    match cert_manager_clone
+                                        .reload_domain_certificate_with_paths(&domain, cert_info.cert_path.clone(), cert_info.key_path.clone())
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            info!("Certificate hot-reload applied for domain '{}'", domain);
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to hot-reload certificate for domain '{}': {}", domain, e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to obtain ACME certificate for domain '{}': {}", domain, e);
+                                }
+                            }
+                        }
+                        
+                        info!("ACME certificate acquisition completed for service '{}'", vhost_name);
+                    });
+                }
+            }
+        }
+
+        // Handle ACME HTTP-01 challenges first (before cache lookup)
+        let uri_path = session.req_header().uri.path();
+        
+        // Check if this is an ACME challenge request
+        if uri_path.starts_with("/.well-known/acme-challenge/") {
+            let token = uri_path.trim_start_matches("/.well-known/acme-challenge/");
+            
+            info!("ACME challenge request received for token: {} (service: {})", token, self.vhost_config.name);
+            
+            if let Some(acme_manager) = &self.acme_manager {
+                // Try to get the challenge response from ACME manager
+                if let Some(challenge_response) = acme_manager.get_challenge_response(token).await {
+                    info!("Serving ACME challenge response for token: {} (length: {} bytes)", token, challenge_response.len());
+                    
+                    // Create a successful HTTP response with the challenge content
+                    let mut resp = ResponseHeader::build(200, None).unwrap();
+                    resp.insert_header("content-type", "text/plain").unwrap();
+                    resp.insert_header("content-length", challenge_response.len().to_string()).unwrap();
+                    resp.insert_header("cache-control", "no-cache").unwrap();
+                    
+                    // Send the response header
+                    session.write_response_header(Box::new(resp), false).await?;
+                    
+                    // Send the challenge response body
+                    session.write_response_body(Some(challenge_response.into()), true).await?;
+                    
+                    // Terminate the request - we've handled it completely
+                    return Ok(true);
+                } else {
+                    warn!("ACME challenge request for unknown token: {} (no ACME manager or token not found)", token);
+                }
+            } else {
+                warn!("ACME challenge request received but no ACME manager available for token: {}", token);
+            }
+            
+            // Return 404 for unknown challenge tokens or when ACME manager is not available
+            info!("Returning 404 for ACME challenge token: {}", token);
+            let mut resp = ResponseHeader::build(404, None).unwrap();
+            resp.insert_header("content-type", "text/plain").unwrap();
+            resp.insert_header("content-length", "9".to_string()).unwrap();
+            
+            session.write_response_header(Box::new(resp), false).await?;
+            session.write_response_body(Some("Not Found".into()), true).await?;
+            
+            return Ok(true);
+        }
         
         // Handle cache lookup if cache service is available
         if let Some(cache_service) = &self.cache_service {
@@ -822,18 +1084,33 @@ mod tests {
         let mut domains = HashMap::new();
         
         // Use paths relative to the workspace root (where tests run from)
-        let cert_path = if PathBuf::from("source/stryvo/assets/test.crt").exists() {
-            PathBuf::from("source/stryvo/assets/test.crt")
-        } else {
-            // Fallback for when running from source/stryvo directory
-            PathBuf::from("assets/test.crt")
+        // Prefer certs in assets/certs/, but support legacy locations too
+        let cert_path = {
+            let candidates = [
+                "source/stryvo/assets/certs/test.local.crt",
+                "source/stryvo/assets/test.crt",
+                "assets/certs/test.local.crt",
+                "assets/test.crt",
+            ];
+            candidates
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("source/stryvo/assets/certs/test.local.crt"))
         };
         
-        let key_path = if PathBuf::from("source/stryvo/assets/test.key").exists() {
-            PathBuf::from("source/stryvo/assets/test.key")
-        } else {
-            // Fallback for when running from source/stryvo directory
-            PathBuf::from("assets/test.key")
+        let key_path = {
+            let candidates = [
+                "source/stryvo/assets/certs/test.local.key",
+                "source/stryvo/assets/test.key",
+                "assets/certs/test.local.key",
+                "assets/test.key",
+            ];
+            candidates
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("source/stryvo/assets/certs/test.local.key"))
         };
         
         domains.insert("example.com".to_string(), DomainConfig {
@@ -841,6 +1118,7 @@ mod tests {
             ssl_config: Some(TlsConfig {
                 cert_path: cert_path.clone(),
                 key_path: key_path.clone(),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -861,6 +1139,7 @@ mod tests {
                 ssl_config: Some(TlsConfig {
                     cert_path,
                     key_path,
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },
@@ -887,7 +1166,7 @@ mod tests {
         }
         
         // This test should succeed since the test certificate files exist
-        let result = VHostProxyService::new(config).await;
+        let result = VHostProxyService::new(config, None).await;
         
         // Print the error for debugging if it fails
         if let Err(ref e) = result {
@@ -976,7 +1255,7 @@ mod tests {
     #[tokio::test]
     async fn test_vhost_routing_logic() {
         let config = create_test_vhost_config();
-        let service = match VHostProxyService::new(config).await {
+        let service = match VHostProxyService::new(config, None).await {
             Ok(service) => service,
             Err(e) => {
                 println!("Failed to create VHost service for routing test: {}", e);
@@ -1015,7 +1294,7 @@ mod tests {
         use http::Method;
         
         let config = create_test_vhost_config();
-        let service = match VHostProxyService::new(config).await {
+        let service = match VHostProxyService::new(config, None).await {
             Ok(service) => service,
             Err(e) => {
                 println!("Failed to create VHost service for upstream peer test: {}", e);
@@ -1049,7 +1328,7 @@ mod tests {
         use http::Method;
         
         let config = create_test_vhost_config();
-        let service = match VHostProxyService::new(config).await {
+        let service = match VHostProxyService::new(config, None).await {
             Ok(service) => service,
             Err(e) => {
                 println!("Failed to create VHost service for fallback test: {}", e);

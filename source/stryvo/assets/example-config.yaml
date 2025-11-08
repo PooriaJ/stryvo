@@ -75,6 +75,7 @@ basic-proxy:
         tls:
           cert_path: "./assets/certs/test.local.crt"
           key_path: "./assets/certs/test.local.key"
+        ssl: true  
         offer-h2: true
     
     # CONNECTORS
@@ -298,6 +299,7 @@ vhost-proxy:
       
       # HTTPS listener on all interfaces, port 443
       - addr: "0.0.0.0:443"
+        ssl: true
         offer-h2: true
         # Note: TLS config is per-domain, not per-listener in VHost mode
     
@@ -305,28 +307,30 @@ vhost-proxy:
     # ---------------------
     # Specific configurations for different domains
     domains:
-      # Production API domain with RoundRobin load balancing
+      # Production API domain with RoundRobin load balancing and auto SSL
       "api.example.com":
         upstreams:
           - proxy-addr: "10.0.1.10:8080"
           - proxy-addr: "10.0.1.11:8080"
           - proxy-addr: "10.0.1.12:8080"
         ssl-config:
-          cert_path: "./assets/certs/test.local.crt"
-          key_path: "./assets/certs/test.local.key"
+          cert_path: "./assets/certs/test.local.crt"  # Ignored when auto-ssl is enabled
+          key_path: "./assets/certs/test.local.key"   # Ignored when auto-ssl is enabled
+          auto-ssl: true  # Enable automatic SSL certificate management
         load-balance:
           selection: "RoundRobin"
           discovery: "Static"
           health-check: "None"
       
-      # Web application domain with Ketama hashing
+      # Web application domain with Ketama hashing and auto SSL
       "app.example.com":
         upstreams:
           - proxy-addr: "10.0.2.10:3000"
           - proxy-addr: "10.0.2.11:3000"
         ssl-config:
-          cert_path: "./assets/certs/test.local.crt"
-          key_path: "./assets/certs/test.local.key"
+          cert_path: "./assets/certs/test.local.crt"  # Ignored when auto-ssl is enabled
+          key_path: "./assets/certs/test.local.key"   # Ignored when auto-ssl is enabled
+          auto-ssl: true  # Enable automatic SSL certificate management
         load-balance:
           selection: "Ketama"
           key: "UriPath"
@@ -485,6 +489,7 @@ vhost-proxy:
       - addr: "0.0.0.0:8080"
         offer-h2: false
       - addr: "0.0.0.0:8443"
+        ssl: true
         offer-h2: true
     
     domains:
@@ -525,6 +530,7 @@ file-server:
         tls:
           cert_path: "./assets/certs/test.local.crt"
           key_path: "./assets/certs/test.local.key"
+        ssl: true  
         offer-h2: true
     
     # FILE SERVER CONFIGURATION
@@ -560,9 +566,78 @@ file-server:
     base-path: "/var/www/html"
 
 #------------------------------------------------------------------------------
+# ACME CONFIGURATION
+#------------------------------------------------------------------------------
+# Automatic SSL certificate management using ACME protocol (Let's Encrypt)
+#------------------------------------------------------------------------------
+# USAGE INSTRUCTIONS
+#------------------------------------------------------------------------------
+# 
+# 1. Replace "yourdomain.com" with your actual domain name
+# 2. Replace "your-email@example.com" with your real email address
+# 3. Make sure your domain points to this server's IP address
+# 4. Ensure port 80 is available for ACME HTTP-01 challenges
+# 5. For production, use the production Let's Encrypt URL:
+#    directory-url: "https://acme-v02.api.letsencrypt.org/directory"
+# 6. Start Stryvo: stryvo --config-yaml auto-ssl-example.yaml
+#
+# The first time you run this:
+# - Stryvo will automatically obtain SSL certificates for your domains
+# - Certificates will be stored in ./acme-certs/
+# - Account information will be stored in ./acme-accounts/
+# - Certificates will be automatically renewed before expiration
+#
+# IMPORTANT NOTES:
+# - Port 80 must be accessible from the internet for HTTP-01 challenges
+# - DNS records for your domains must point to this server
+# - Let's Encrypt has rate limits - use staging for testing
+# - Certificates are automatically renewed every 30 days before expiration
+acme:
+  # Enable ACME automatic SSL certificate management
+  enabled: true
+  
+  # ACME directory URL (Let's Encrypt production)
+  # Use "https://acme-staging-v02.api.letsencrypt.org/directory" for testing
+  directory-url: "https://acme-v02.api.letsencrypt.org/directory"
+  
+  # Email address for ACME account registration (required)
+  email: "admin@example.com"
+  
+  # Directory to store ACME certificates and keys
+  cert-dir: "./acme-certs"
+  
+  # Directory to store ACME account information
+  account-dir: "./acme-accounts"
+  
+  # Certificate renewal threshold in days (renew when cert expires within this many days)
+  renewal-days: 30
+  
+  # Challenge type for domain validation
+  challenge-type: "http-01"  # Options: http-01, dns-01
+  
+  # HTTP-01 challenge configuration
+  http-challenge:
+    # Port to serve HTTP-01 challenges on (usually 80)
+    port: 80
+    # Bind address for HTTP-01 challenge server
+    bind-addr: "0.0.0.0"
+  
+  # Key type for generated certificates
+  key-type: "ECDSA_P256"  # Options: RSA, ECDSA_P256, ECDSA_P384
+  
+  # RSA key size (only used when key-type is RSA)
+  rsa-key-size: 2048
+
+#------------------------------------------------------------------------------
 # CONFIGURATION NOTES
 #------------------------------------------------------------------------------
 # 
+# ACME AUTO SSL:
+# - Set auto-ssl: true in ssl-config to enable automatic certificate management
+# - Certificates will be automatically obtained and renewed
+# - Manual cert-path and key-path are ignored when auto-ssl is enabled
+# - Ensure port 80 is available for HTTP-01 challenges
+#
 # LOAD BALANCING OPTIONS:
 # - RoundRobin: Distributes requests evenly across upstreams
 # - Random: Randomly selects an upstream for each request

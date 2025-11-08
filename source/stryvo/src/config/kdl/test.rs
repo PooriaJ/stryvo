@@ -26,6 +26,7 @@ fn load_test() {
     let expected = crate::config::internal::Config {
         validate_configs: false,
         threads_per_service: 8,
+        acme: crate::acme::config::AcmeConfig::default(),
         logging: crate::logging::LoggingConfig::default(),
         basic_proxies: vec![
             ProxyConfig {
@@ -45,6 +46,7 @@ fn load_test() {
                             tls: Some(crate::config::internal::TlsConfig {
                                 cert_path: "./assets/test.crt".into(),
                                 key_path: "./assets/test.key".into(),
+                                auto_ssl: false,
                             }),
                             ssl: true,
                             offer_h2: true,
@@ -182,6 +184,7 @@ fn load_test() {
                         tls: Some(crate::config::internal::TlsConfig {
                             cert_path: "./assets/test.crt".into(),
                             key_path: "./assets/test.key".into(),
+                            auto_ssl: false,
                         }),
                         ssl: true,
                         offer_h2: true,

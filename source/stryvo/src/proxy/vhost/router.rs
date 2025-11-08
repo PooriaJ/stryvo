@@ -587,6 +587,7 @@ mod tests {
             ssl_config: Some(TlsConfig {
                 cert_path: PathBuf::from("./source/stryvo/assets/test.crt"),
                 key_path: PathBuf::from("./source/stryvo/assets/test.key"),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -597,6 +598,7 @@ mod tests {
             ssl_config: Some(TlsConfig {
                 cert_path: PathBuf::from("./source/stryvo/assets/test.crt"),
                 key_path: PathBuf::from("./source/stryvo/assets/test.key"),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -638,6 +640,7 @@ mod tests {
                 ssl_config: Some(TlsConfig {
                     cert_path: PathBuf::from("./source/stryvo/assets/test.crt"),
                     key_path: PathBuf::from("./source/stryvo/assets/test.key"),
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },

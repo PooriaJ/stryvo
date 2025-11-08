@@ -118,13 +118,6 @@ impl From<ConnectorConfig> for HttpPeer {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
-pub struct ConnectorTlsConfig {
-    pub proxy_sni: String,
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ListenerTlsConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
@@ -180,6 +173,7 @@ impl From<ListenerTlsConfig> for super::internal::TlsConfig {
         Self {
             cert_path: other.cert_path,
             key_path: other.key_path,
+            auto_ssl: false, // Default to false for TOML format
         }
     }
 }
@@ -378,6 +372,7 @@ pub mod test {
         let sys_snapshot = internal::Config {
             validate_configs: false,
             threads_per_service: 8,
+            acme: crate::acme::config::AcmeConfig::default(),
             basic_proxies: vec![
                 internal::ProxyConfig {
                     name: "Example1".into(),
@@ -396,6 +391,7 @@ pub mod test {
                                 tls: Some(internal::TlsConfig {
                                     cert_path: "./assets/test.crt".into(),
                                     key_path: "./assets/test.key".into(),
+                                    auto_ssl: false,
                                 }),
                                 ssl: true,
                                 offer_h2: false,

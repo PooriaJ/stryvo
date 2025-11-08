@@ -12,17 +12,33 @@ mod integration_tests {
         // Create a test VHost configuration similar to what main.rs would process
         let mut domains = HashMap::new();
         
-        // Use test certificate files
-        let cert_path = if PathBuf::from("assets/test.crt").exists() {
-            PathBuf::from("assets/test.crt")
-        } else {
-            PathBuf::from("source/stryvo/assets/test.crt")
+        // Resolve test certificate files from available locations
+        let cert_path = {
+            let candidates = [
+                "source/stryvo/assets/certs/test.local.crt",
+                "assets/certs/test.local.crt",
+                "source/stryvo/assets/test.crt",
+                "assets/test.crt",
+            ];
+            candidates
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("source/stryvo/assets/certs/test.local.crt"))
         };
         
-        let key_path = if PathBuf::from("assets/test.key").exists() {
-            PathBuf::from("assets/test.key")
-        } else {
-            PathBuf::from("source/stryvo/assets/test.key")
+        let key_path = {
+            let candidates = [
+                "source/stryvo/assets/certs/test.local.key",
+                "assets/certs/test.local.key",
+                "source/stryvo/assets/test.key",
+                "assets/test.key",
+            ];
+            candidates
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("source/stryvo/assets/certs/test.local.key"))
         };
         
         domains.insert("example.com".to_string(), DomainConfig {
@@ -30,6 +46,7 @@ mod integration_tests {
             ssl_config: Some(TlsConfig {
                 cert_path: cert_path.clone(),
                 key_path: key_path.clone(),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -50,6 +67,7 @@ mod integration_tests {
                 ssl_config: Some(TlsConfig {
                     cert_path,
                     key_path,
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },
@@ -76,6 +94,7 @@ mod integration_tests {
             vhost_proxies: vec![vhost_config.clone()],
             file_servers: vec![],
             logging: stryvo::logging::LoggingConfig::default(),
+            acme: stryvo::acme::config::AcmeConfig::default(),
         };
 
         // Create a test server (similar to main.rs)
@@ -85,7 +104,7 @@ mod integration_tests {
         );
 
         // Test the VHost service creation (this is what main.rs does)
-        let service = stryvo_vhost_service(vhost_config, &test_server);
+        let service = stryvo_vhost_service(vhost_config, None, &test_server);
         
         // Verify the service was created successfully
         assert_eq!(service.name(), "integration-test-vhost");
@@ -101,16 +120,32 @@ mod integration_tests {
     #[test]
     fn test_main_multiple_vhost_integration() {
         // Create multiple VHost configurations
-        let cert_path = if PathBuf::from("assets/test.crt").exists() {
-            PathBuf::from("assets/test.crt")
-        } else {
-            PathBuf::from("source/stryvo/assets/test.crt")
+        let cert_path = {
+            let candidates = [
+                "source/stryvo/assets/certs/test.local.crt",
+                "assets/certs/test.local.crt",
+                "source/stryvo/assets/test.crt",
+                "assets/test.crt",
+            ];
+            candidates
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("source/stryvo/assets/certs/test.local.crt"))
         };
         
-        let key_path = if PathBuf::from("assets/test.key").exists() {
-            PathBuf::from("assets/test.key")
-        } else {
-            PathBuf::from("source/stryvo/assets/test.key")
+        let key_path = {
+            let candidates = [
+                "source/stryvo/assets/certs/test.local.key",
+                "assets/certs/test.local.key",
+                "source/stryvo/assets/test.key",
+                "assets/test.key",
+            ];
+            candidates
+                .iter()
+                .map(|p| PathBuf::from(p))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("source/stryvo/assets/certs/test.local.key"))
         };
 
         let mut vhost_configs = vec![];
@@ -122,6 +157,7 @@ mod integration_tests {
             ssl_config: Some(TlsConfig {
                 cert_path: cert_path.clone(),
                 key_path: key_path.clone(),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -142,6 +178,7 @@ mod integration_tests {
                 ssl_config: Some(TlsConfig {
                     cert_path: cert_path.clone(),
                     key_path: key_path.clone(),
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },
@@ -163,6 +200,7 @@ mod integration_tests {
             ssl_config: Some(TlsConfig {
                 cert_path: cert_path.clone(),
                 key_path: key_path.clone(),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -183,6 +221,7 @@ mod integration_tests {
                 ssl_config: Some(TlsConfig {
                     cert_path,
                     key_path,
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },
@@ -209,6 +248,7 @@ mod integration_tests {
             vhost_proxies: vhost_configs.clone(),
             file_servers: vec![],
             logging: stryvo::logging::LoggingConfig::default(),
+            acme: stryvo::acme::config::AcmeConfig::default(),
         };
 
         let test_server = Server::new_with_opt_and_conf(
@@ -219,7 +259,7 @@ mod integration_tests {
         // Test creating multiple VHost services (simulating main.rs loop)
         let mut services = vec![];
         for vhost_conf in vhost_configs {
-            let service = stryvo_vhost_service(vhost_conf, &test_server);
+            let service = stryvo_vhost_service(vhost_conf, None, &test_server);
             services.push(service);
         }
 
@@ -273,6 +313,7 @@ mod integration_tests {
             vhost_proxies: vec![vhost_config.clone()],
             file_servers: vec![],
             logging: stryvo::logging::LoggingConfig::default(),
+            acme: stryvo::acme::config::AcmeConfig::default(),
         };
 
         let _test_server = Server::new_with_opt_and_conf(

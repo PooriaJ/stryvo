@@ -55,6 +55,49 @@ system {
 }
 
 #------------------------------------------------------------------------------
+# ACME CONFIGURATION
+#------------------------------------------------------------------------------
+# Automatic SSL certificate management using ACME protocol (Let's Encrypt)
+
+acme {
+    # Enable ACME automatic SSL certificate management
+    enabled true
+    
+    # ACME directory URL (Let's Encrypt production)
+    # Use "https://acme-staging-v02.api.letsencrypt.org/directory" for testing
+    directory-url "https://acme-v02.api.letsencrypt.org/directory"
+    
+    # Email address for ACME account registration (required)
+    email "admin@example.com"
+    
+    # Directory to store ACME certificates and keys
+    cert-dir "./acme-certs"
+    
+    # Directory to store ACME account information
+    account-dir "./acme-accounts"
+    
+    # Certificate renewal threshold in days
+    renewal-days 30
+    
+    # Challenge type for domain validation
+    challenge-type "http-01"  // Options: http-01, dns-01
+    
+    # HTTP-01 challenge configuration
+    http-challenge {
+        # Port to serve HTTP-01 challenges on (usually 80)
+        port 80
+        # Bind address for HTTP-01 challenge server
+        bind-addr "0.0.0.0"
+    }
+    
+    # Key type for generated certificates
+    key-type "ECDSA_P256"  // Options: RSA, ECDSA_P256, ECDSA_P384
+    
+    # RSA key size (only used when key-type is RSA)
+    rsa-key-size 2048
+}
+
+#------------------------------------------------------------------------------
 # SERVICES CONFIGURATION
 #------------------------------------------------------------------------------
 # Services define the core functionality of Stryvo.
@@ -77,6 +120,10 @@ services {
             # HTTPS listener on all interfaces, port 4443
             # With TLS certificate and HTTP/2 support
             "0.0.0.0:4443" cert-path="./assets/test.crt" key-path="./assets/test.key" offer-h2=true
+            
+            # HTTPS listener with automatic SSL (ACME)
+            # When auto-ssl=true, cert-path and key-path are ignored
+            "0.0.0.0:8443" cert-path="" key-path="" auto-ssl=true offer-h2=true
         }
         
         # RATE LIMITING

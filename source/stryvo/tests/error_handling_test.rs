@@ -22,6 +22,7 @@ mod error_handling_tests {
             ssl_config: Some(TlsConfig {
                 cert_path: PathBuf::from("/nonexistent/test.crt"),
                 key_path: PathBuf::from("/nonexistent/test.key"),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -35,6 +36,7 @@ mod error_handling_tests {
                 ssl_config: Some(TlsConfig {
                     cert_path: PathBuf::from("/nonexistent/default.crt"),
                     key_path: PathBuf::from("/nonexistent/default.key"),
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },
@@ -228,6 +230,7 @@ mod error_handling_tests {
             ssl_config: Some(TlsConfig {
                 cert_path: PathBuf::from("./assets/test.crt"),
                 key_path: PathBuf::from("./assets/test.key"),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -248,6 +251,7 @@ mod error_handling_tests {
                 ssl_config: Some(TlsConfig {
                     cert_path: PathBuf::from("./assets/default.crt"),
                     key_path: PathBuf::from("./assets/default.key"),
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },

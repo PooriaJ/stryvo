@@ -1,3 +1,4 @@
+mod acme;
 mod config;
 mod files;
 mod logging;
@@ -51,7 +52,7 @@ fn main() {
     // Configure VHost proxy services with SNI certificate selection
     for vhost_conf in conf.vhost_proxies {
         tracing::info!("Configuring VHost Proxy: {}", vhost_conf.name);
-        let service = stryvo_vhost_service(vhost_conf, &my_server);
+        let service = stryvo_vhost_service(vhost_conf, Some(conf.acme.clone()), &my_server);
         services.push(service);
     }
 

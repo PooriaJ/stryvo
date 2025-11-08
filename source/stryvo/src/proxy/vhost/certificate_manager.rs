@@ -3,11 +3,13 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use tokio::sync::{RwLock, mpsc};
 use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype, NameType};
+use openssl::x509::X509;
 use pingora::{Error, ErrorType};
 use pingora::listeners::tls::TlsSettings;
 use pingora::listeners::TlsAccept;
 use pingora::protocols::tls::TlsRef;
 use pingora_openssl::ext::{ssl_use_certificate, ssl_use_private_key};
+use openssl::nid::Nid;
 use tracing::{info, warn, error, debug};
 use async_trait::async_trait;
 use notify::RecommendedWatcher;
@@ -23,6 +25,8 @@ pub struct CertificateManager {
     /// Maps domain names to their TLS configurations for SNI handling
     #[allow(dead_code)]
     tls_configs: Arc<RwLock<HashMap<String, TlsConfig>>>,
+    /// Cached intermediate certificates per domain to ensure full chains are served
+    domain_intermediates: Arc<RwLock<HashMap<String, Vec<X509>>>>,
     /// Default TLS configuration
     default_tls_config: TlsConfig,
     /// File system watcher for certificate files
@@ -54,6 +58,7 @@ impl CertificateManager {
     pub async fn new(vhost_config: &VHostConfig) -> Result<Self, Error> {
         let mut certificates = HashMap::new();
         let mut tls_configs = HashMap::new();
+        let mut domain_intermediates: HashMap<String, Vec<X509>> = HashMap::new();
         let mut certificate_load_errors = Vec::new();
         
         info!("Initializing certificate manager for VHost service '{}'", vhost_config.name);
@@ -66,35 +71,73 @@ impl CertificateManager {
             })?.clone();
         
         // Load default certificate first with enhanced error handling
-        info!("Loading default certificate from cert: {:?}, key: {:?}", 
-              default_tls_config.cert_path, default_tls_config.key_path);
+        if default_tls_config.auto_ssl {
+            info!("Auto SSL enabled for default domain - creating bootstrap certificate");
+        } else {
+            info!("Loading default certificate from cert: {:?}, key: {:?}", 
+                  default_tls_config.cert_path, default_tls_config.key_path);
+        }
         
         let default_certificate = Self::load_ssl_acceptor(&Some(default_tls_config.clone()))
             .map_err(|e| {
-                error!("CRITICAL: Failed to load default certificate for VHost service '{}' - cert: {:?}, key: {:?}, error: {}", 
-                       vhost_config.name, default_tls_config.cert_path, default_tls_config.key_path, e);
+                if default_tls_config.auto_ssl {
+                    error!("CRITICAL: Failed to create bootstrap certificate for auto SSL default domain in VHost service '{}': {}", 
+                           vhost_config.name, e);
+                } else {
+                    error!("CRITICAL: Failed to load default certificate for VHost service '{}' - cert: {:?}, key: {:?}, error: {}", 
+                           vhost_config.name, default_tls_config.cert_path, default_tls_config.key_path, e);
+                }
                 error!("Default certificate is required for VHost service to function - service cannot start");
                 e
             })?;
         
-        info!("Successfully loaded default certificate for VHost service '{}'", vhost_config.name);
+        if default_tls_config.auto_ssl {
+            info!("Successfully created bootstrap certificate for auto SSL default domain in VHost service '{}'", vhost_config.name);
+        } else {
+            info!("Successfully loaded default certificate for VHost service '{}'", vhost_config.name);
+        }
         
         // Load certificates for each configured domain with comprehensive error handling
         for (domain_name, domain_config) in &vhost_config.domains {
             if let Some(ssl_config) = &domain_config.ssl_config {
-                debug!("Loading certificate for domain '{}' - cert: {:?}, key: {:?}", 
-                       domain_name, ssl_config.cert_path, ssl_config.key_path);
+                if ssl_config.auto_ssl {
+                    debug!("Auto SSL enabled for domain '{}' - creating bootstrap certificate", domain_name);
+                } else {
+                    debug!("Loading certificate for domain '{}' - cert: {:?}, key: {:?}", 
+                           domain_name, ssl_config.cert_path, ssl_config.key_path);
+                }
                 
                 match Self::load_ssl_acceptor(&Some(ssl_config.clone())) {
                     Ok(acceptor) => {
                         certificates.insert(domain_name.clone(), Arc::new(acceptor));
                         tls_configs.insert(domain_name.clone(), ssl_config.clone());
-                        info!("Successfully loaded SSL certificate for domain '{}' - cert: {:?}", 
-                              domain_name, ssl_config.cert_path);
+                        // Pre-cache intermediates for non-auto_ssl configs
+                        if !ssl_config.auto_ssl {
+                            if let Ok(pem) = std::fs::read(&ssl_config.cert_path) {
+                                if let Ok(chain) = X509::stack_from_pem(&pem) {
+                                    let intermediates: Vec<X509> = chain.into_iter().skip(1).collect();
+                                    if !intermediates.is_empty() {
+                                        domain_intermediates.insert(domain_name.clone(), intermediates);
+                                        debug!("Cached intermediates for domain '{}' during init", domain_name);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if ssl_config.auto_ssl {
+                            info!("Successfully created bootstrap certificate for auto SSL domain '{}'", domain_name);
+                        } else {
+                            info!("Successfully loaded SSL certificate for domain '{}' - cert: {:?}", 
+                                  domain_name, ssl_config.cert_path);
+                        }
                     }
                     Err(e) => {
-                        let error_msg = format!("Failed to load SSL certificate for domain '{}' - cert: {:?}, key: {:?}, error: {}", 
-                                               domain_name, ssl_config.cert_path, ssl_config.key_path, e);
+                        let error_msg = if ssl_config.auto_ssl {
+                            format!("Failed to create bootstrap certificate for auto SSL domain '{}': {}", domain_name, e)
+                        } else {
+                            format!("Failed to load SSL certificate for domain '{}' - cert: {:?}, key: {:?}, error: {}", 
+                                   domain_name, ssl_config.cert_path, ssl_config.key_path, e)
+                        };
                         error!("{}", error_msg);
                         certificate_load_errors.push((domain_name.clone(), error_msg));
                         
@@ -123,15 +166,19 @@ impl CertificateManager {
         // Create file-to-domain mapping for reload tracking
         let mut file_to_domain_map = HashMap::new();
         
-        // Map default certificate files
-        file_to_domain_map.insert(default_tls_config.cert_path.clone(), "default".to_string());
-        file_to_domain_map.insert(default_tls_config.key_path.clone(), "default".to_string());
+        // Map default certificate files (only if not using auto_ssl)
+        if !default_tls_config.auto_ssl {
+            file_to_domain_map.insert(default_tls_config.cert_path.clone(), "default".to_string());
+            file_to_domain_map.insert(default_tls_config.key_path.clone(), "default".to_string());
+        }
         
-        // Map domain certificate files
+        // Map domain certificate files (only if not using auto_ssl)
         for (domain_name, domain_config) in &vhost_config.domains {
             if let Some(ssl_config) = &domain_config.ssl_config {
-                file_to_domain_map.insert(ssl_config.cert_path.clone(), domain_name.clone());
-                file_to_domain_map.insert(ssl_config.key_path.clone(), domain_name.clone());
+                if !ssl_config.auto_ssl {
+                    file_to_domain_map.insert(ssl_config.cert_path.clone(), domain_name.clone());
+                    file_to_domain_map.insert(ssl_config.key_path.clone(), domain_name.clone());
+                }
             }
         }
         
@@ -139,13 +186,88 @@ impl CertificateManager {
             certificates: Arc::new(RwLock::new(certificates)),
             default_certificate: Arc::new(default_certificate),
             tls_configs: Arc::new(RwLock::new(tls_configs)),
+            domain_intermediates: Arc::new(RwLock::new(domain_intermediates)),
             default_tls_config,
             _watcher: None,
             reload_sender: None,
             file_to_domain_map: Arc::new(RwLock::new(file_to_domain_map)),
         })
     }
-    
+
+    /// Reload the SSL acceptor for a specific domain using explicit cert/key file paths
+    /// This bypasses auto_ssl bootstrap and ensures real ACME certificates are installed.
+    pub async fn reload_domain_certificate_with_paths(
+        &self,
+        domain_name: &str,
+        cert_path: PathBuf,
+        key_path: PathBuf,
+    ) -> Result<(), Error> {
+        debug!(
+            "Reloading certificate (explicit paths) for domain '{}' from cert: {:?}, key: {:?}",
+            domain_name, cert_path, key_path
+        );
+
+        // Construct a non-auto_ssl TLS config pointing to the real files
+        let explicit_cfg = TlsConfig {
+            cert_path: cert_path.clone(),
+            key_path: key_path.clone(),
+            auto_ssl: false,
+        };
+
+        // Build acceptor from provided paths
+        let new_acceptor = match Self::load_ssl_acceptor(&Some(explicit_cfg.clone())) {
+            Ok(a) => a,
+            Err(e) => {
+                error!(
+                    "Certificate reload (explicit paths) failed for domain '{}' - cert: {:?}, key: {:?}, error: {}",
+                    domain_name, cert_path, key_path, e
+                );
+                return Err(e);
+            }
+        };
+
+        // Swap the acceptor in the certificate map
+        let mut certs = self.certificates.write().await;
+        certs.insert(domain_name.to_string(), Arc::new(new_acceptor));
+
+        // Update stored TLS config for the domain to reflect real file locations
+        let mut tls_configs = self.tls_configs.write().await;
+        tls_configs.insert(
+            domain_name.to_string(),
+            TlsConfig {
+                cert_path,
+                key_path,
+                auto_ssl: false,
+            },
+        );
+
+        // Cache intermediates from the new fullchain for reliable SNI attachment
+        {
+            let mut intermediates_map = self.domain_intermediates.write().await;
+            if let Ok(pem) = std::fs::read(tls_configs.get(domain_name).unwrap().cert_path.clone()) {
+                if let Ok(chain) = X509::stack_from_pem(&pem) {
+                    let intermediates: Vec<X509> = chain.into_iter().skip(1).collect();
+                    if !intermediates.is_empty() {
+                        intermediates_map.insert(domain_name.to_string(), intermediates);
+                        debug!(
+                            "Cached intermediates from fullchain for domain '{}' after reload",
+                            domain_name
+                        );
+                    } else {
+                        intermediates_map.remove(domain_name);
+                    }
+                } else {
+                    intermediates_map.remove(domain_name);
+                }
+            } else {
+                intermediates_map.remove(domain_name);
+            }
+        }
+
+        info!("Certificate reloaded with explicit paths for domain '{}'", domain_name);
+        Ok(())
+    }
+
     /// Extract SNI (Server Name Indication) from SSL connection
     /// This function is called during the TLS handshake to determine which certificate to use
     pub fn extract_sni_domain(ssl: &TlsRef) -> Option<String> {
@@ -212,11 +334,20 @@ impl CertificateManager {
         
         // Now create TLS settings with callbacks using this certificate manager
         let callbacks: Box<dyn TlsAccept + Send + Sync> = Box::new(self.clone());
-        let tls_settings = TlsSettings::with_callbacks(callbacks)
+        let mut tls_settings = TlsSettings::with_callbacks(callbacks)
             .map_err(|e| {
                 error!("Failed to create TLS settings with callbacks: {}", e);
                 *Error::new(ErrorType::InternalError)
             })?;
+        // Ensure compatibility with common clients by explicitly allowing TLS 1.2 and 1.3
+        // Some environments default to TLS 1.3 only for callback-based settings
+        tls_settings.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2));
+        tls_settings.set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_3));
+        debug!(
+            "Configured SNI TLS settings with min TLS {:?} and max TLS {:?}",
+            openssl::ssl::SslVersion::TLS1_2,
+            openssl::ssl::SslVersion::TLS1_3
+        );
         
         info!("Created TLS settings with SNI callback for dynamic certificate selection");
         
@@ -287,8 +418,14 @@ impl CertificateManager {
                 *Error::new(ErrorType::InternalError)
             })?;
         
-        debug!("Starting certificate loading process - cert: {:?}, key: {:?}", 
-               ssl_config.cert_path, ssl_config.key_path);
+        debug!("Starting certificate loading process - cert: {:?}, key: {:?}, auto_ssl: {}", 
+               ssl_config.cert_path, ssl_config.key_path, ssl_config.auto_ssl);
+        
+        // Handle auto_ssl configuration
+        if ssl_config.auto_ssl {
+            info!("Auto SSL enabled for this configuration - generating self-signed certificate for bootstrap");
+            return Self::create_self_signed_acceptor();
+        }
         
         // Validate certificate and key files exist with detailed error messages
         if !ssl_config.cert_path.exists() {
@@ -370,6 +507,219 @@ impl CertificateManager {
         Ok(acceptor.build())
     }
     
+    /// Create a self-signed SSL acceptor for auto_ssl bootstrap
+    /// This is used as a temporary certificate until ACME certificates are obtained
+    fn create_self_signed_acceptor() -> Result<SslAcceptor, Error> {
+        use openssl::x509::X509Builder;
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::hash::MessageDigest;
+        use openssl::asn1::Asn1Time;
+        use openssl::bn::{BigNum, MsbOption};
+        use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectAlternativeName};
+        
+        debug!("Creating self-signed certificate for auto_ssl bootstrap");
+        
+        // Generate RSA key pair
+        let rsa = Rsa::generate(2048)
+            .map_err(|e| {
+                error!("Failed to generate RSA key for self-signed certificate: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        let key_pair = PKey::from_rsa(rsa)
+            .map_err(|e| {
+                error!("Failed to create key pair from RSA key: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        // Create certificate
+        let mut cert_builder = X509Builder::new()
+            .map_err(|e| {
+                error!("Failed to create X509 certificate builder: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        // Set version (X.509 v3)
+        cert_builder.set_version(2)
+            .map_err(|e| {
+                error!("Failed to set certificate version: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        // Set serial number
+        let serial_number = {
+            let mut serial = BigNum::new()
+                .map_err(|e| {
+                    error!("Failed to create serial number: {}", e);
+                    *Error::new(ErrorType::InternalError)
+                })?;
+            serial.rand(159, MsbOption::MAYBE_ZERO, false)
+                .map_err(|e| {
+                    error!("Failed to generate random serial number: {}", e);
+                    *Error::new(ErrorType::InternalError)
+                })?;
+            serial.to_asn1_integer()
+                .map_err(|e| {
+                    error!("Failed to convert serial number to ASN1: {}", e);
+                    *Error::new(ErrorType::InternalError)
+                })?
+        };
+        cert_builder.set_serial_number(&serial_number)
+            .map_err(|e| {
+                error!("Failed to set certificate serial number: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        // Set validity period (1 day for bootstrap certificate)
+        let not_before = Asn1Time::days_from_now(0)
+            .map_err(|e| {
+                error!("Failed to create 'not before' time: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        cert_builder.set_not_before(&not_before)
+            .map_err(|e| {
+                error!("Failed to set certificate 'not before' time: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        let not_after = Asn1Time::days_from_now(1)
+            .map_err(|e| {
+                error!("Failed to create 'not after' time: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        cert_builder.set_not_after(&not_after)
+            .map_err(|e| {
+                error!("Failed to set certificate 'not after' time: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        // Set public key
+        cert_builder.set_pubkey(&key_pair)
+            .map_err(|e| {
+                error!("Failed to set certificate public key: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        // Set subject and issuer (self-signed)
+        let mut name_builder = openssl::x509::X509NameBuilder::new()
+            .map_err(|e| {
+                error!("Failed to create X509 name builder: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        name_builder.append_entry_by_text("C", "US")
+            .map_err(|e| {
+                error!("Failed to set country in certificate name: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        name_builder.append_entry_by_text("ST", "CA")
+            .map_err(|e| {
+                error!("Failed to set state in certificate name: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        name_builder.append_entry_by_text("O", "Stryvo Auto SSL")
+            .map_err(|e| {
+                error!("Failed to set organization in certificate name: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        name_builder.append_entry_by_text("CN", "stryvo-bootstrap.local")
+            .map_err(|e| {
+                error!("Failed to set common name in certificate name: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        let name = name_builder.build();
+        
+        cert_builder.set_subject_name(&name)
+            .map_err(|e| {
+                error!("Failed to set certificate subject name: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        cert_builder.set_issuer_name(&name)
+            .map_err(|e| {
+                error!("Failed to set certificate issuer name: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        // Add extensions
+        cert_builder.append_extension(
+            BasicConstraints::new().build()
+                .map_err(|e| {
+                    error!("Failed to create basic constraints extension: {}", e);
+                    *Error::new(ErrorType::InternalError)
+                })?
+        ).map_err(|e| {
+            error!("Failed to add basic constraints extension: {}", e);
+            *Error::new(ErrorType::InternalError)
+        })?;
+        
+        cert_builder.append_extension(
+            KeyUsage::new()
+                .critical()
+                .key_encipherment()
+                .digital_signature()
+                .build()
+                .map_err(|e| {
+                    error!("Failed to create key usage extension: {}", e);
+                    *Error::new(ErrorType::InternalError)
+                })?
+        ).map_err(|e| {
+            error!("Failed to add key usage extension: {}", e);
+            *Error::new(ErrorType::InternalError)
+        })?;
+        
+        cert_builder.append_extension(
+            SubjectAlternativeName::new()
+                .dns("stryvo-bootstrap.local")
+                .dns("localhost")
+                .build(&cert_builder.x509v3_context(None, None))
+                .map_err(|e| {
+                    error!("Failed to create subject alternative name extension: {}", e);
+                    *Error::new(ErrorType::InternalError)
+                })?
+        ).map_err(|e| {
+            error!("Failed to add subject alternative name extension: {}", e);
+            *Error::new(ErrorType::InternalError)
+        })?;
+        
+        // Sign the certificate
+        cert_builder.sign(&key_pair, MessageDigest::sha256())
+            .map_err(|e| {
+                error!("Failed to sign self-signed certificate: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        let cert = cert_builder.build();
+        
+        // Create SSL acceptor with the self-signed certificate
+        let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+            .map_err(|e| {
+                error!("Failed to create SSL acceptor for self-signed certificate: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        acceptor.set_certificate(&cert)
+            .map_err(|e| {
+                error!("Failed to set self-signed certificate: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        acceptor.set_private_key(&key_pair)
+            .map_err(|e| {
+                error!("Failed to set private key for self-signed certificate: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        acceptor.check_private_key()
+            .map_err(|e| {
+                error!("Self-signed certificate private key verification failed: {}", e);
+                *Error::new(ErrorType::InternalError)
+            })?;
+        
+        info!("Successfully created self-signed certificate for auto_ssl bootstrap");
+        
+        Ok(acceptor.build())
+    }
+    
     /// Get statistics about loaded certificates
     pub async fn get_certificate_stats(&self) -> CertificateStats {
         let certificates = self.certificates.read().await;
@@ -418,6 +768,112 @@ impl TlsAccept for CertificateManager {
                     error!("Failed to set private key for domain '{}': {}", sni_domain, e);
                     return;
                 }
+
+                // Log certificate subject/issuer to verify which cert is presented
+                if let Some(cert_ref) = acceptor.context().certificate() {
+                    let subject_cn = cert_ref
+                        .subject_name()
+                        .entries_by_nid(Nid::COMMONNAME)
+                        .next()
+                        .and_then(|e| e.data().as_utf8().ok())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    let issuer_cn = cert_ref
+                        .issuer_name()
+                        .entries_by_nid(Nid::COMMONNAME)
+                        .next()
+                        .and_then(|e| e.data().as_utf8().ok())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    info!(
+                        "SNI certificate details for '{}': subject CN='{}', issuer CN='{}'",
+                        sni_domain, subject_cn, issuer_cn
+                    );
+                }
+
+                // Attach intermediate chain certificates to the connection to preserve fullchain
+                // Prefer cached intermediates; fall back to reading the fullchain from cert_path
+                let mut added_total = 0usize;
+                if let Ok(map) = self.domain_intermediates.try_read() {
+                    if let Some(intermediates) = map.get(&sni_domain) {
+                        for cert in intermediates.iter() {
+                            if let Err(e) = ssl.add_chain_cert(cert.to_owned()) {
+                                warn!(
+                                    "Failed to add cached chain certificate for domain '{}': {}",
+                                    sni_domain,
+                                    e
+                                );
+                            } else {
+                                added_total += 1;
+                            }
+                        }
+                        if added_total > 0 {
+                            debug!(
+                                "Attached {} cached intermediate cert(s) for domain '{}'",
+                                added_total,
+                                sni_domain
+                            );
+                        }
+                    }
+                }
+
+                // Skip using acceptor.context().extra_chain_certs() as it may be null
+                // on contexts without an explicit fullchain loaded (e.g., self-signed bootstrap).
+                // Instead rely on cached intermediates or reading from cert_path.
+
+                // If still no intermediates, try reading from cert_path
+                if added_total == 0 {
+                    if let Ok(cfgs) = self.tls_configs.try_read() {
+                        if let Some(cfg) = cfgs.get(&sni_domain) {
+                            if let Ok(pem) = std::fs::read(&cfg.cert_path) {
+                                match X509::stack_from_pem(&pem) {
+                                    Ok(chain) => {
+                                        for cert in chain.into_iter().skip(1) {
+                                            if let Err(e) = ssl.add_chain_cert(cert) {
+                                                warn!(
+                                                    "Failed to add chain certificate from file for domain '{}': {}",
+                                                    sni_domain,
+                                                    e
+                                                );
+                                            } else {
+                                                added_total += 1;
+                                            }
+                                        }
+                                        if added_total > 0 {
+                                            debug!(
+                                                "Attached {} intermediate cert(s) from file for domain '{}'",
+                                                added_total,
+                                                sni_domain
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to parse certificate chain PEM for domain '{}': {}",
+                                            sni_domain,
+                                            e
+                                        );
+                                    }
+                                }
+                            } else {
+                                debug!(
+                                    "Could not read cert_path {:?} for domain '{}' to attach chain",
+                                    cfg.cert_path, sni_domain
+                                );
+                            }
+                        } else {
+                            debug!(
+                                "No TLS config found for domain '{}' while attaching chain; skipping",
+                                sni_domain
+                            );
+                        }
+                    } else {
+                        debug!(
+                            "Could not acquire tls_configs lock while attaching chain for domain '{}'",
+                            sni_domain
+                        );
+                    }
+                }
                 
                 debug!("Successfully set certificate and key for domain '{}'", sni_domain);
             } else {
@@ -456,6 +912,7 @@ mod tests {
             ssl_config: Some(TlsConfig {
                 cert_path: PathBuf::from("/nonexistent/example.com.crt"),
                 key_path: PathBuf::from("/nonexistent/example.com.key"),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         });
@@ -469,6 +926,7 @@ mod tests {
                 ssl_config: Some(TlsConfig {
                     cert_path: PathBuf::from("/nonexistent/default.crt"),
                     key_path: PathBuf::from("/nonexistent/default.key"),
+                    auto_ssl: false,
                 }),
                 upstream_options: UpstreamOptions::default(),
             },
@@ -524,6 +982,7 @@ mod tests {
         let ssl_config = Some(TlsConfig {
             cert_path: PathBuf::from("/nonexistent/test.crt"),
             key_path: PathBuf::from("/nonexistent/test.key"),
+            auto_ssl: false,
         });
         
         let result = CertificateManager::load_ssl_acceptor(&ssl_config);

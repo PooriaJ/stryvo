@@ -9,6 +9,7 @@ use pingora::upstreams::peer::HttpPeer;
 use serde::{Deserialize, Serialize};
 
 use super::internal::UpstreamOptions;
+use crate::acme::config::AcmeConfig;
 
 /// Configuration used for YAML formatted files
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -29,6 +30,10 @@ pub struct Yaml {
     /// Configuration for each File Server instance
     #[serde(default = "Vec::new")]
     pub file_server: Vec<FileServerConfig>,
+
+    /// ACME configuration for automatic SSL certificate management
+    #[serde(default)]
+    pub acme: AcmeConfig,
 }
 
 impl Yaml {
@@ -419,6 +424,9 @@ pub struct FileServerConfig {
 pub struct TlsConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+    /// Enable automatic SSL certificate management via ACME
+    #[serde(default)]
+    pub auto_ssl: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -449,6 +457,7 @@ impl From<Yaml> for super::internal::Config {
         config.pid_file = yaml.system.pid_file;
         config.upgrade_socket = yaml.system.upgrade_socket;
         config.logging = yaml.system.logging.into();
+        config.acme = yaml.acme;
         
         // Convert basic proxies
         config.basic_proxies = yaml.basic_proxy.into_iter().map(Into::into).collect();
@@ -691,6 +700,7 @@ impl From<TlsConfig> for super::internal::TlsConfig {
         Self {
             cert_path: yaml_tls.cert_path,
             key_path: yaml_tls.key_path,
+            auto_ssl: yaml_tls.auto_ssl,
         }
     }
 }

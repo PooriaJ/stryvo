@@ -27,6 +27,7 @@ fn create_test_vhost_config_for_hot_reload() -> VHostConfig {
         ssl_config: Some(TlsConfig {
             cert_path: PathBuf::from("/tmp/test_certs/example.com.crt"),
             key_path: PathBuf::from("/tmp/test_certs/example.com.key"),
+            auto_ssl: false,
         }),
         upstream_options: UpstreamOptions::default(),
     });
@@ -36,6 +37,7 @@ fn create_test_vhost_config_for_hot_reload() -> VHostConfig {
         ssl_config: Some(TlsConfig {
             cert_path: PathBuf::from("/tmp/test_certs/api.example.com.crt"),
             key_path: PathBuf::from("/tmp/test_certs/api.example.com.key"),
+            auto_ssl: false,
         }),
         upstream_options: UpstreamOptions::default(),
     });
@@ -49,6 +51,7 @@ fn create_test_vhost_config_for_hot_reload() -> VHostConfig {
             ssl_config: Some(TlsConfig {
                 cert_path: PathBuf::from("/tmp/test_certs/default.crt"),
                 key_path: PathBuf::from("/tmp/test_certs/default.key"),
+                auto_ssl: false,
             }),
             upstream_options: UpstreamOptions::default(),
         },
