@@ -116,65 +116,40 @@ impl VHostProxyService {
                 info!("Auto SSL domains detected and ACME enabled - initializing ACME manager for service '{}'", vhost_config.name);
                 
                 let mut acme_manager = AcmeManager::new(acme_config.clone());
-                
-                // Initialize the ACME manager
+
+                // Collect AutoSSL domains from config first
+                let auto_ssl_domains: Vec<String> = vhost_config.domains.iter()
+                    .filter_map(|(name, config)| {
+                        if config.ssl_config.as_ref().map(|s| s.auto_ssl).unwrap_or(false) {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !auto_ssl_domains.is_empty() {
+                    info!("Auto SSL enabled for {} domain(s): {:?}", auto_ssl_domains.len(), auto_ssl_domains);
+                    // Mark all AutoSSL domains as pending before initialization; the manager will
+                    // load existing certs and skip already valid ones during immediate acquisition.
+                    acme_manager.add_pending_domains(auto_ssl_domains.clone()).await;
+                    info!(
+                        "Added {} domain(s) to ACME manager for startup acquisition: {:?}",
+                        auto_ssl_domains.len(), auto_ssl_domains
+                    );
+                } else {
+                    info!("No AutoSSL domains configured — skipping ACME startup acquisition");
+                }
+
+                // Initialize the ACME manager (creates dirs, loads certs, starts immediate + nightly tasks)
                 if let Err(e) = acme_manager.initialize().await {
                     error!("Failed to initialize ACME manager for service '{}': {}", vhost_config.name, e);
-                    warn!("Continuing without ACME manager - auto SSL domains will use bootstrap certificates");
+                    warn!("Continuing without ACME manager - AutoSSL domains will use bootstrap certificates");
                     None
                 } else {
                     info!("ACME manager initialized successfully for service '{}'", vhost_config.name);
-                    
-                    // Collect domains that need certificates
-                    let auto_ssl_domains: Vec<String> = vhost_config.domains.iter()
-                        .filter_map(|(name, config)| {
-                            if config.ssl_config.as_ref().map(|s| s.auto_ssl).unwrap_or(false) {
-                                Some(name.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    
-                    if !auto_ssl_domains.is_empty() {
-                        info!("Auto SSL enabled for {} domain(s): {:?}", auto_ssl_domains.len(), auto_ssl_domains);
-                        
-                        // Filter domains: only mark missing or near-expiration certificates (< renewal_days)
-                        let mut pending_domains: Vec<String> = Vec::new();
-                        for domain in auto_ssl_domains.iter() {
-                            if let Some(info) = acme_manager.get_certificate_info(domain).await {
-                                let days_left = info.days_until_expiration();
-                                let threshold = acme_config.renewal_days as i64;
-                                if info.needs_renewal(acme_config.renewal_days) {
-                                    info!(
-                                        "Auto-SSL: cached certificate for '{}' near expiration ({} days left < {} days); marking for renewal",
-                                        domain, days_left, threshold
-                                    );
-                                    pending_domains.push(domain.clone());
-                                } else {
-                                    info!(
-                                        "Auto-SSL: using cached certificate for '{}' ({} days left ≥ {} days); not marking as pending",
-                                        domain, days_left, threshold
-                                    );
-                                }
-                            } else {
-                                info!("Auto-SSL: no cached certificate found for '{}' — marking for acquisition", domain);
-                                pending_domains.push(domain.clone());
-                            }
-                        }
-                        
-                        if !pending_domains.is_empty() {
-                            acme_manager.add_pending_domains(pending_domains.clone()).await;
-                            info!(
-                                "Added {} domain(s) to ACME manager for acquisition/renewal: {:?}",
-                                pending_domains.len(), pending_domains
-                            );
-                        } else {
-                            info!("No domains require ACME acquisition or renewal at startup");
-                        }
-                    }
-                    
-                    // Create ACME manager arc after adding pending domains
+
+                    // Create ACME manager arc after initialization
                     let acme_manager_arc = Arc::new(acme_manager);
 
                     // Eagerly install any existing ACME certificates into the TLS manager
@@ -207,14 +182,21 @@ impl VHostProxyService {
                         let cert_mgr = Arc::clone(&certificate_manager);
                         let service_name = vhost_config.name.clone();
                         let configured_domains = vhost_config.domains.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                match rx.recv().await {
-                                    Ok(CertEvent::Installed { domain, cert_path, key_path }) => {
-                                        if configured_domains.contains_key(domain.as_str()) {
-                                            match cert_mgr
-                                                .reload_domain_certificate_with_paths(&domain, cert_path.clone(), key_path.clone())
-                                                .await
+                        // Run the event subscription on a dedicated runtime thread so it
+                        // survives the temporary runtime used during service construction.
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("Failed to create runtime for ACME cert event listener");
+                            rt.block_on(async move {
+                                loop {
+                                    match rx.recv().await {
+                                        Ok(CertEvent::Installed { domain, cert_path, key_path }) => {
+                                            if configured_domains.contains_key(domain.as_str()) {
+                                                match cert_mgr
+                                                    .reload_domain_certificate_with_paths(&domain, cert_path.clone(), key_path.clone())
+                                                    .await
                                             {
                                                 Ok(()) => info!(
                                                     "[{}] Hot-reloaded installed certificate for domain '{}'",
@@ -253,16 +235,29 @@ impl VHostProxyService {
                                                 service_name, domain
                                             );
                                         }
-                                    }
-                                    Err(e) => {
-                                        // Receiver errors only occur on channel closed or lag; continue listening
-                                        debug!(
-                                            "[{}] Cert event receiver error: {:?} — continuing",
-                                            service_name, e
-                                        );
+                                        }
+                                        Err(e) => {
+                                            match e {
+                                                tokio::sync::broadcast::error::RecvError::Closed => {
+                                                    // Channel closed during shutdown; exit listener to avoid noisy loops
+                                                    debug!(
+                                                        "[{}] Cert event channel closed — exiting listener",
+                                                        service_name
+                                                    );
+                                                    break;
+                                                }
+                                                tokio::sync::broadcast::error::RecvError::Lagged(n) => {
+                                                    // Missed n messages; continue to listen
+                                                    debug!(
+                                                        "[{}] Cert event receiver lagged by {} — continuing",
+                                                        service_name, n
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                            }
+                            });
                         });
                     }
 

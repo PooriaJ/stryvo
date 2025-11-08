@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
@@ -138,6 +138,7 @@ impl AcmeManager {
             })?;
         
         // Check if we already have a valid certificate
+        let mut is_renewal = false;
         {
             let certificates = self.certificates.read().await;
             // Find any certificate that covers this domain (not only keyed by primary domain)
@@ -155,6 +156,7 @@ impl AcmeManager {
                         "Cached certificate for '{}' is nearing expiration ({} days left, threshold {} days) or invalid — proceeding to renewal",
                         primary_domain, days, threshold
                     );
+                    is_renewal = true;
                 }
             } else {
                 info!(
@@ -173,6 +175,20 @@ impl AcmeManager {
             let mut certificates = self.certificates.write().await;
             certificates.insert(primary_domain.clone(), cert_info.clone());
         }
+        // Broadcast install/renew event for hot-reload
+        let _ = if is_renewal {
+            self.cert_event_tx.send(CertEvent::Renewed {
+                domain: primary_domain.clone(),
+                cert_path: cert_info.cert_path.clone(),
+                key_path: cert_info.key_path.clone(),
+            })
+        } else {
+            self.cert_event_tx.send(CertEvent::Installed {
+                domain: primary_domain.clone(),
+                cert_path: cert_info.cert_path.clone(),
+                key_path: cert_info.key_path.clone(),
+            })
+        };
         
         Ok(cert_info)
     }
@@ -255,12 +271,14 @@ impl AcmeManager {
         Ok(())
     }
     
-    /// Start the background renewal task
+    /// Start the background renewal task (daily midnight checks only)
     async fn start_renewal_task(&mut self) {
         let certificates = Arc::clone(&self.certificates);
         let pending_domains = Arc::clone(&self.pending_domains);
         let config = self.config.clone();
         let event_tx = self.cert_event_tx.clone();
+        // Share the same challenge store with the spawned manager to serve HTTP-01 via VHost
+        let challenge_store = self.challenge_server.as_ref().map(|s| Arc::clone(&s.challenges));
 
         let handle = tokio::spawn(async move {
             // Align first run to local midnight to avoid per-request overhead
@@ -283,8 +301,8 @@ impl AcmeManager {
 
                 // Log current certificate statuses for audit
                 {
-                    let certificates = certificates.read().await;
-                    for (primary, cert) in certificates.iter() {
+                    let certs_read = certificates.read().await;
+                    for (primary, cert) in certs_read.iter() {
                         debug!(
                             "Certificate status: '{}' expires in {} days (valid: {}, threshold: {} days)",
                             primary,
@@ -302,11 +320,13 @@ impl AcmeManager {
                 };
 
                 for domain in domains_to_acquire {
-                    if domain == "default" { continue; }
+                    if domain == "default" {
+                        continue;
+                    }
 
                     let existing = {
-                        let certs = certificates.read().await;
-                        certs.get(&domain).cloned()
+                        let certs_read = certificates.read().await;
+                        certs_read.get(&domain).cloned()
                     };
 
                     let should_acquire = match existing {
@@ -333,18 +353,27 @@ impl AcmeManager {
                     };
 
                     if should_acquire {
+                        // Create a manager that shares the same challenge store so VHost can serve tokens
                         let mut manager = AcmeManager::new(config.clone());
+                        if let Some(store) = &challenge_store {
+                            if let Some(ref mut server) = manager.challenge_server {
+                                server.challenges = Arc::clone(store);
+                            }
+                        }
                         if let Err(e) = manager.create_directories().await {
                             error!("Failed to create directories for {}: {}", domain, e);
                             continue;
                         }
                         if let Err(e) = manager.load_existing_certificates().await {
-                            warn!("Failed to load existing certificates before acquisition for {}: {}", domain, e);
+                            warn!(
+                                "Failed to load existing certificates before acquisition for {}: {}",
+                                domain, e
+                            );
                         }
                         match manager.get_certificate(&[domain.clone()]).await {
                             Ok(cert_info) => {
-                                let mut certs = certificates.write().await;
-                                certs.insert(domain.clone(), cert_info.clone());
+                                let mut certs_write = certificates.write().await;
+                                certs_write.insert(domain.clone(), cert_info.clone());
                                 info!(
                                     "Installed certificate for {} (expires in {} days)",
                                     domain,
@@ -358,7 +387,10 @@ impl AcmeManager {
                                 });
                             }
                             Err(e) => {
-                                error!("Failed to acquire initial/renewed certificate for {}: {}", domain, e);
+                                error!(
+                                    "Failed to acquire initial/renewed certificate for {}: {}",
+                                    domain, e
+                                );
                             }
                         }
                     }
@@ -366,8 +398,8 @@ impl AcmeManager {
 
                 // Renew certificates already managed if under threshold
                 let certs_to_renew = {
-                    let certificates = certificates.read().await;
-                    certificates
+                    let certs_read = certificates.read().await;
+                    certs_read
                         .iter()
                         .filter(|(_, cert)| cert.needs_renewal(config.renewal_days))
                         .map(|(domain, cert)| (domain.clone(), cert.domains.clone()))
@@ -377,17 +409,25 @@ impl AcmeManager {
                 for (primary_domain, domains) in certs_to_renew {
                     info!("Renewing certificate for {}", primary_domain);
                     let mut manager = AcmeManager::new(config.clone());
+                    if let Some(store) = &challenge_store {
+                        if let Some(ref mut server) = manager.challenge_server {
+                            server.challenges = Arc::clone(store);
+                        }
+                    }
                     if let Err(e) = manager.create_directories().await {
-                        error!("Failed to create directories for {}: {}", primary_domain, e);
+                        error!(
+                            "Failed to create directories for {}: {}",
+                            primary_domain, e
+                        );
                         continue;
                     }
                     match manager.obtain_certificate(&domains).await {
                         Ok(new_cert) => {
-                            let mut certificates = certificates.write().await;
+                            let mut certs_write = certificates.write().await;
                             // Clone paths before moving cert into map
                             let cert_path = new_cert.cert_path.clone();
                             let key_path = new_cert.key_path.clone();
-                            certificates.insert(primary_domain.clone(), new_cert);
+                            certs_write.insert(primary_domain.clone(), new_cert);
                             info!("Successfully renewed certificate for {}", primary_domain);
                             // Notify listeners for hot-reload
                             let _ = event_tx.send(CertEvent::Renewed {
@@ -397,7 +437,10 @@ impl AcmeManager {
                             });
                         }
                         Err(e) => {
-                            error!("Failed to renew certificate for {}: {}", primary_domain, e);
+                            error!(
+                                "Failed to renew certificate for {}: {}",
+                                primary_domain, e
+                            );
                         }
                     }
                 }
@@ -408,6 +451,70 @@ impl AcmeManager {
         });
 
         self.renewal_task = Some(handle);
+    }
+
+    /// Run immediate acquisition for pending domains after a delay, once listeners are expected up
+    pub async fn run_startup_acquisition_after(&self, delay: Duration) {
+        info!(
+            "ACME startup: waiting {}s before immediate acquisition for pending domains",
+            delay.as_secs()
+        );
+        tokio::time::sleep(delay).await;
+
+        // Drain pending domains populated at startup (missing certs only)
+        let domains_to_acquire = {
+            let mut pending = self.pending_domains.write().await;
+            pending.drain(..).collect::<Vec<_>>()
+        };
+
+        for domain in domains_to_acquire {
+            if domain == "default" {
+                continue;
+            }
+
+            let existing = {
+                let certs_read = self.certificates.read().await;
+                certs_read.get(&domain).cloned()
+            };
+
+            match existing {
+                None => {
+                    info!(
+                        "Startup: no existing certificate for '{}' — acquiring immediately",
+                        domain
+                    );
+                    match self.get_certificate(&[domain.clone()]).await {
+                        Ok(info) => {
+                            info!(
+                                "Startup: installed certificate for {} (expires in {} days)",
+                                domain,
+                                info.days_until_expiration()
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Startup: failed to acquire certificate for {}: {}",
+                                domain, e
+                            );
+                        }
+                    }
+                }
+                Some(info) => {
+                    let days_left = info.days_until_expiration();
+                    if info.needs_renewal(self.config.renewal_days) {
+                        info!(
+                            "Startup: certificate for '{}' near expiration ({} days < {} days) — deferring to midnight",
+                            domain, days_left, self.config.renewal_days
+                        );
+                    } else {
+                        info!(
+                            "Startup: certificate for '{}' is sufficiently valid ({} days ≥ {} days) — skipping",
+                            domain, days_left, self.config.renewal_days
+                        );
+                    }
+                }
+            }
+        }
     }
     
     /// Obtain a new certificate from ACME provider
@@ -450,7 +557,13 @@ impl AcmeManager {
         
         // Get authorizations and complete challenges
         info!("Processing domain authorizations and challenges");
+        // Track which domains/tokens we've already validated to avoid re-validating in a loop
+        let mut validated_domains: HashSet<String> = HashSet::new();
+        let mut handled_tokens: HashSet<String> = HashSet::new();
+        let mut attempts: u32 = 0;
+
         let order_csr = loop {
+            attempts += 1;
             if let Some(order_csr) = order.confirm_validations() {
                 info!("All domain validations confirmed, proceeding to certificate generation");
                 break order_csr;
@@ -461,13 +574,24 @@ impl AcmeManager {
             
             for auth in auths {
                 let domain = auth.api_auth().identifier.value.clone();
-                info!("Validating domain: {}", domain);
                 
                 match self.config.challenge_type {
                     ChallengeType::Http01 => {
                         let challenge = auth.http_challenge();
                         let token = challenge.http_token().to_string();
                         let key_auth = challenge.http_proof();
+
+                        // Skip re-validation if we've already handled this token in a prior loop
+                        if handled_tokens.contains(&token) {
+                            debug!(
+                                "Challenge token already handled for domain '{}'; skipping re-validate",
+                                domain
+                            );
+                            continue;
+                        }
+                        
+                        // First time handling this challenge for the domain
+                        info!("Validating domain: {}", domain);
                         
                         info!("Setting up HTTP-01 challenge for domain '{}' with token: {}", domain, token);
                         
@@ -503,6 +627,8 @@ impl AcmeManager {
                             })?;
                         
                         info!("Domain '{}' validated successfully", domain);
+                        validated_domains.insert(domain.clone());
+                        handled_tokens.insert(token.clone());
                         
                         // Remove challenge from server
                         if let Some(ref server) = self.challenge_server {
@@ -516,6 +642,22 @@ impl AcmeManager {
                         });
                     }
                 }
+            }
+
+            // If we've already submitted all validations, avoid hammering the challenge API; wait briefly
+            if validated_domains.len() >= domains.len() {
+                debug!(
+                    "All challenges submitted ({}); waiting for order confirmation",
+                    validated_domains.len()
+                );
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+            }
+
+            // Safety guard to avoid endless loops in case of unexpected API behavior
+            if attempts > 120 { // ~60 seconds max with 500ms sleeps
+                return Err(AcmeError::AcmeClient { 
+                    reason: "Timed out waiting for ACME order validations to confirm".to_string() 
+                });
             }
         };
         

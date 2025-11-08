@@ -194,6 +194,9 @@ pub fn stryvo_vhost_service(
         }
     }
     
+    // Clone ACME manager handle before moving the service
+    let acme_manager_handle = vhost_service.acme_manager.clone();
+
     // Create the Pingora HTTP proxy service with VHost support
     let mut proxy_service = pingora_proxy::http_proxy_service_with_name(
         &server.configuration,
@@ -220,6 +223,21 @@ pub fn stryvo_vhost_service(
         conf.name,
         conf.domains.len()
     );
+    
+    // Trigger ACME startup acquisition AFTER listeners are configured, with a short delay.
+    // Use a dedicated thread + Tokio runtime so the task survives service creation.
+    if let Some(mgr) = acme_manager_handle {
+        std::thread::spawn(move || {
+            // A lightweight single-threaded runtime is sufficient here
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create runtime for ACME startup acquisition");
+            rt.block_on(async move {
+                mgr.run_startup_acquisition_after(std::time::Duration::from_secs(5)).await;
+            });
+        });
+    }
     
     Box::new(proxy_service)
 }
