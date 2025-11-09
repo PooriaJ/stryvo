@@ -1,6 +1,6 @@
 [package]
 name          = "stryvo"
-version       = "0.6.0"
+version       = "0.7.5"
 
 authors       = [
     "James Munns <james@onevariable.com>",

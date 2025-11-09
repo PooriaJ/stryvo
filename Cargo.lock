@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "stryvo"
-version = "0.6.0"
+version = "0.7.5"
 dependencies = [
  "acme-lib",
  "ahash",

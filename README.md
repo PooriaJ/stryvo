@@ -8,6 +8,7 @@ Stryvo is a high-performance reverse proxy application built on the [Pingora](ht
 - **High Performance**: Leverages **Pingora** for exceptional speed and efficiency.
 - **Flexible Configuration**: Supports KDL, TOML, and YAML configuration formats.
 - **TLS Support**: Full TLS termination for secure HTTP/1.x and HTTP/2 connections.
+- **Auto SSL (ACME)**: Automatically provisions and renews TLS certificates via **ACME** (e.g., Let's Encrypt) for effortless HTTPS management.
 - **Load Balancing**: Implements Round Robin, Random, FNV, and Ketama strategies.
 - **Rate Limiting**: Configurable limits based on source IP, URIs, or URI patterns.
 - **Path Control**: Advanced request and response filtering and modification.
@@ -21,7 +22,7 @@ Stryvo is a high-performance reverse proxy application built on the [Pingora](ht
 
 ## Current State
 
-Stryvo is at version 0.6.0. Refer to the [v0.6.0 release notes](https://github.com/PooriaJ/stryvo/blob/main/docs/release-notes/2025-04-26-v0.5.0.md) for details on recent updates.
+Stryvo is at version 0.7.5. Refer to the [v0.7.5 release notes](https://github.com/PooriaJ/stryvo/blob/main/docs/release-notes/2025-04-26-v0.5.0.md) for details on recent updates.
 
 **Note**: The project is under active development, and configuration formats or features may change. Stability is not guaranteed until further notice.
 
