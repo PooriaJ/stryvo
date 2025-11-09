@@ -341,8 +341,12 @@ impl CertificateManager {
             })?;
         // Ensure compatibility with common clients by explicitly allowing TLS 1.2 and 1.3
         // Some environments default to TLS 1.3 only for callback-based settings
-        tls_settings.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2));
-        tls_settings.set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_3));
+        if let Err(e) = tls_settings.set_min_proto_version(Some(openssl::ssl::SslVersion::TLS1_2)) {
+            warn!("Failed to set min TLS version to TLS1_2: {:?}", e);
+        }
+        if let Err(e) = tls_settings.set_max_proto_version(Some(openssl::ssl::SslVersion::TLS1_3)) {
+            warn!("Failed to set max TLS version to TLS1_3: {:?}", e);
+        }
         debug!(
             "Configured SNI TLS settings with min TLS {:?} and max TLS {:?}",
             openssl::ssl::SslVersion::TLS1_2,

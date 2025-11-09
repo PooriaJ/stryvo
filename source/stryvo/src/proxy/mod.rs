@@ -205,7 +205,7 @@ pub fn stryvo_vhost_service(
     );
 
     // Add prepared listeners (TLS, TCP, UDS)
-    for (addr, mut settings) in prepared_tls {
+    for (addr, settings) in prepared_tls {
         proxy_service.add_tls_with_settings(&addr, None, settings);
         tracing::info!("Added VHost TLS/SSL listener on {}", addr);
     }

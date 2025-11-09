@@ -15,8 +15,6 @@ pub struct CertificateInfo {
     pub expires_at: DateTime<Utc>,
     /// Whether this certificate is currently valid
     pub is_valid: bool,
-    /// Certificate serial number
-    pub serial_number: String,
 }
 
 /// Errors that can occur during certificate operations
@@ -30,15 +28,6 @@ pub enum CertificateError {
     
     #[error("Failed to parse certificate: {reason}")]
     ParseError { reason: String },
-    
-    #[error("Certificate has expired")]
-    Expired,
-    
-    #[error("Certificate is not yet valid")]
-    NotYetValid,
-    
-    #[error("Domain {domain} not covered by certificate")]
-    DomainNotCovered { domain: String },
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -59,7 +48,7 @@ impl CertificateInfo {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(without_tz, "%b %e %H:%M:%S %Y")
             .or_else(|_| chrono::NaiveDateTime::parse_from_str(without_tz, "%b %d %H:%M:%S %Y"))
         {
-            return chrono::DateTime::<Utc>::from_utc(naive, Utc);
+            return chrono::DateTime::from_naive_utc_and_offset(naive, Utc);
         }
 
         // Fallback: try with timezone token
@@ -126,18 +115,12 @@ impl CertificateInfo {
             }
         }
         
-        // Get serial number
-        let serial_number = cert.serial_number().to_bn()
-            .map(|bn| bn.to_hex_str().map(|s| s.to_string()).unwrap_or_else(|_| "unknown".to_string()))
-            .unwrap_or_else(|_| "unknown".to_string());
-        
         Ok(CertificateInfo {
             domains,
             cert_path,
             key_path,
             expires_at,
             is_valid,
-            serial_number,
         })
     }
     
@@ -197,7 +180,6 @@ mod tests {
             key_path: PathBuf::from("key.pem"),
             expires_at: Utc::now() + chrono::Duration::days(30),
             is_valid: true,
-            serial_number: "123456".to_string(),
         };
         
         assert!(cert_info.covers_domain("example.com"));
@@ -213,7 +195,6 @@ mod tests {
             key_path: PathBuf::from("key.pem"),
             expires_at: Utc::now() + chrono::Duration::days(30),
             is_valid: true,
-            serial_number: "123456".to_string(),
         };
         
         assert!(cert_info.covers_domain("api.example.com"));
@@ -230,7 +211,6 @@ mod tests {
             key_path: PathBuf::from("key.pem"),
             expires_at: Utc::now() + chrono::Duration::days(15), // Expires in 15 days
             is_valid: true,
-            serial_number: "123456".to_string(),
         };
         
         assert!(cert_info.needs_renewal(30)); // Should renew (15 < 30)

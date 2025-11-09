@@ -193,14 +193,6 @@ impl AcmeManager {
         Ok(cert_info)
     }
     
-    /// Get certificate info for a domain
-    pub async fn get_certificate_info(&self, domain: &str) -> Option<CertificateInfo> {
-        let certificates = self.certificates.read().await;
-        certificates.values()
-            .find(|cert| cert.covers_domain(domain))
-            .cloned()
-    }
-    
     /// List all managed certificates
     pub async fn list_certificates(&self) -> Vec<CertificateInfo> {
         let certificates = self.certificates.read().await;
@@ -552,7 +544,7 @@ impl AcmeManager {
         let alt_names: Vec<&str> = domains.iter().skip(1).map(|s| s.as_str()).collect();
         info!("Creating ACME order for primary domain '{}' with {} alternative names", primary_domain, alt_names.len());
         
-        let order = account.new_order(primary_domain, &alt_names)
+        let mut order = account.new_order(primary_domain, &alt_names)
             .map_err(|e| AcmeError::AcmeClient { reason: format!("Failed to create ACME order: {}", e) })?;
         
         // Get authorizations and complete challenges
@@ -561,9 +553,18 @@ impl AcmeManager {
         let mut validated_domains: HashSet<String> = HashSet::new();
         let mut handled_tokens: HashSet<String> = HashSet::new();
         let mut attempts: u32 = 0;
+        // Exponential backoff when waiting for ACME to confirm validations
+        let mut backoff_ms: u64 = 1000; // start with 1s
+        let mut logged_waiting_once: bool = false;
 
         let order_csr = loop {
             attempts += 1;
+            // Always refresh the order state against the ACME API before checking validations
+            if let Err(e) = order.refresh() {
+                return Err(AcmeError::AcmeClient { 
+                    reason: format!("Failed to refresh ACME order: {}", e)
+                });
+            }
             if let Some(order_csr) = order.confirm_validations() {
                 info!("All domain validations confirmed, proceeding to certificate generation");
                 break order_csr;
@@ -625,6 +626,12 @@ impl AcmeManager {
                                 domain: domain.clone(), 
                                 reason: format!("Domain validation failed: {}", e)
                             })?;
+                        // Refresh the order after submitting validation to progress its state
+                        if let Err(e) = order.refresh() {
+                            return Err(AcmeError::AcmeClient { 
+                                reason: format!("Failed to refresh ACME order after validation: {}", e)
+                            });
+                        }
                         
                         info!("Domain '{}' validated successfully", domain);
                         validated_domains.insert(domain.clone());
@@ -644,17 +651,21 @@ impl AcmeManager {
                 }
             }
 
-            // If we've already submitted all validations, avoid hammering the challenge API; wait briefly
+            // If we've already submitted all validations, avoid hammering the challenge API; wait with backoff
             if validated_domains.len() >= domains.len() {
-                debug!(
-                    "All challenges submitted ({}); waiting for order confirmation",
-                    validated_domains.len()
-                );
-                tokio::time::sleep(Duration::from_millis(2000)).await;
+                if !logged_waiting_once {
+                    debug!(
+                        "All challenges submitted ({}); waiting for order confirmation",
+                        validated_domains.len()
+                    );
+                    logged_waiting_once = true;
+                }
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(15_000); // cap at 15s
             }
 
             // Safety guard to avoid endless loops in case of unexpected API behavior
-            if attempts > 120 { // ~60 seconds max with 500ms sleeps
+            if attempts > 120 { // guard number of iterations; backoff caps total wait to a few minutes
                 return Err(AcmeError::AcmeClient { 
                     reason: "Timed out waiting for ACME order validations to confirm".to_string() 
                 });

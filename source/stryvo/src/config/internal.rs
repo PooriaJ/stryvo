@@ -312,12 +312,22 @@ pub enum ListenerKind {
     Uds(PathBuf),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct UpstreamOptions {
     pub(crate) selection: SelectionKind,
     pub(crate) selector: RequestSelector,
     pub(crate) health_checks: HealthCheckKind,
     pub(crate) discovery: DiscoveryKind,
+}
+
+impl PartialEq for UpstreamOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.selection == other.selection
+            && self.health_checks == other.health_checks
+            && self.discovery == other.discovery
+        // Note: We intentionally skip comparing selector because it's a function pointer
+        // and function pointer comparisons are unreliable in Rust
+    }
 }
 
 impl Default for UpstreamOptions {

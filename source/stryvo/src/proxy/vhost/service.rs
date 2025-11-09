@@ -28,8 +28,6 @@ pub struct VHostProxyService {
     pub cache_service: Option<Arc<CacheService>>,
     /// ACME manager for automatic SSL certificate management
     pub acme_manager: Option<Arc<AcmeManager>>,
-    /// Flag to track if ACME acquisition has been triggered
-    acme_triggered: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl VHostProxyService {
@@ -281,7 +279,6 @@ impl VHostProxyService {
             vhost_config,
             cache_service,
             acme_manager,
-            acme_triggered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 

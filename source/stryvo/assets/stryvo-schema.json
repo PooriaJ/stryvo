@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stryvo Config",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "system": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "threads-per-service": { "type": "integer" },
+        "daemonize": { "type": "boolean" },
+        "logging": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "access-log": { "type": "string" },
+            "error-log": { "type": "string" },
+            "level": { "type": "string" },
+            "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "acme": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "directory-url": { "type": "string" },
+        "email": { "type": "string" },
+        "cert-dir": { "type": "string" },
+        "account-dir": { "type": "string" },
+        "renewal-days": { "type": "integer" },
+        "challenge-type": { "type": "string" },
+        "http-challenge": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "port": { "type": "integer" },
+            "bind-addr": { "type": "string" }
+          }
+        },
+        "key-type": { "type": "string" }
+      }
+    },
+    "vhost-proxy": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "name": { "type": "string" },
+          "listeners": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "addr": { "type": "string" },
+                "ssl": { "type": "boolean" },
+                "offer-h2": { "type": "boolean" }
+              }
+            }
+          },
+          "domains": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "upstreams": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "proxy-addr": { "type": "string" },
+                      "tls-sni": { "type": "string" },
+                      "proto": { "type": "string" }
+                    }
+                  }
+                },
+                "ssl-config": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "cert-path": { "type": "string" },
+                    "key-path": { "type": "string" },
+                    "auto-ssl": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "default-domain": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "upstreams": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "proxy-addr": { "type": "string" },
+                    "tls-sni": { "type": "string" },
+                    "proto": { "type": "string" }
+                  }
+                }
+              },
+              "ssl-config": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "cert-path": { "type": "string" },
+                  "key-path": { "type": "string" },
+                  "auto-ssl": { "type": "boolean" }
+                }
+              },
+              "cache": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "cache-enabled": { "type": "boolean" },
+                  "cache-ttl": { "type": "integer" },
+                  "shard-count": { "type": "integer" },
+                  "cache-dir": { "type": "string" },
+                  "max-file-size": { "type": "integer" },
+                  "browser-cache-enabled": { "type": "boolean" },
+                  "browser-cache-ttl": { "type": "integer" }
+                }
+              }
+            }
+          },
+          "cache": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "cache-enabled": { "type": "boolean" },
+              "cache-ttl": { "type": "integer" },
+              "shard-count": { "type": "integer" },
+              "cache-dir": { "type": "string" },
+              "max-file-size": { "type": "integer" },
+              "browser-cache-enabled": { "type": "boolean" },
+              "browser-cache-ttl": { "type": "integer" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

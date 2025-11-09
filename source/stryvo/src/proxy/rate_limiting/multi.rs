@@ -15,12 +15,6 @@ use crate::proxy::rate_limiting::Ticket;
 
 use super::RegexShim;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct MultiRaterInstanceConfig {
-    pub rater_cfg: MultiRaterConfig,
-    pub kind: MultiRequestKeyKind,
-}
-
 /// Configuration for the [`Rater`]
 #[derive(Debug, PartialEq, Clone)]
 pub struct MultiRaterConfig {
